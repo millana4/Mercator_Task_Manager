@@ -10,7 +10,8 @@ CREATE TABLE IF NOT EXISTS measurement
     original_price  Nullable(Float64),
     quantity        Nullable(UInt32),
     rating          Nullable(Float32),
-    reviews_count   Nullable(UInt32)
+    reviews_count   Nullable(UInt32),
+    parser_id       String DEFAULT ''
 )
 ENGINE = MergeTree
 ORDER BY (card_id, parsed_at);

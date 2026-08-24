@@ -89,6 +89,7 @@ public class ParseResultConsumer {
                 .quantity(card.getQuantity())
                 .rating(parseFloat(card.getRating()))
                 .reviewsCount(parseInt(card.getReviewsCount()))
+                .parserId(result.getParserId() != null ? result.getParserId() : "")
                 .build();
         measurementRepository.insert(m);
 

@@ -27,4 +27,5 @@ public class Measurement {
     private Integer quantity;
     private Float rating;
     private Integer reviewsCount;
+    private String parserId;
 }

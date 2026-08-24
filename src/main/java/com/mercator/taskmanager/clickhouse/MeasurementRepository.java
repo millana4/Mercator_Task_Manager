@@ -31,8 +31,8 @@ public class MeasurementRepository {
     public void insert(Measurement m) {
         clickhouse.update(
                 "INSERT INTO measurement " +
-                        "(card_id, sku, parsed_at, geo, card_price, price, original_price, quantity, rating, reviews_count) " +
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "(card_id, sku, parsed_at, geo, card_price, price, original_price, quantity, rating, reviews_count, parser_id) " +
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 m.getCardId(),
                 m.getSku(),
                 Timestamp.from(m.getParsedAt().toInstant().truncatedTo(java.time.temporal.ChronoUnit.SECONDS)),
@@ -42,7 +42,8 @@ public class MeasurementRepository {
                 m.getOriginalPrice(),
                 m.getQuantity(),
                 m.getRating(),
-                m.getReviewsCount()
+                m.getReviewsCount(),
+                m.getParserId() != null ? m.getParserId() : ""
         );
     }
 
@@ -60,7 +61,7 @@ public class MeasurementRepository {
     public List<Measurement> findByCardId(UUID cardId) {
         return clickhouse.query(
                 "SELECT card_id, sku, parsed_at, geo, card_price, price, " +
-                        "original_price, quantity, rating, reviews_count " +
+                        "original_price, quantity, rating, reviews_count, parser_id " +
                         "FROM measurement WHERE card_id = ? ORDER BY parsed_at",
                 (rs, rowNum) -> Measurement.builder()
                         .cardId(UUID.fromString(rs.getString("card_id")))
@@ -80,6 +81,7 @@ public class MeasurementRepository {
                                 ? ((Number) rs.getObject("rating")).floatValue() : null)
                         .reviewsCount(rs.getObject("reviews_count") != null
                                 ? ((Number) rs.getObject("reviews_count")).intValue() : null)
+                        .parserId(rs.getString("parser_id"))
                         .build(),
                 cardId);
     }
