@@ -1,24 +1,26 @@
 # Развёртывание с нуля: парсер + таск-менеджер
 
 Полная пошаговая инструкция, проверенная на боевом развёртывании. Порядок важен:
-сначала парсер, потом таск-менеджер + Kafka + базы.
+сначала парсер, потом таск-менеджер + базы + Redis.
 
 Предполагается: чистый сервер с установленными `git`, `docker`, `docker compose`.
 Обе части (парсер и ядро) — на одной машине, но в двух независимых
-docker-compose. Парсер общается с ядром только через Kafka.
+docker-compose. Парсер общается с ядром через Redis (транспорт задач) и,
+опционально, по HTTP (синхронная отладка).
 
 ---
 
 ## Общая картина
 
-- **Таск-менеджер** (один docker-compose): Postgres + ClickHouse + Kafka + приложение таск-менеджера.
-- **Парсер** (отдельный docker-compose): HTTP-сервис + воркер. Их может быть
-  много на разных IP. Подключается к Kafka ядра.
-- **Связь**: воркер парсера читает задачи из Kafka ядра и пишет результаты обратно.
+- **Таск-менеджер** (один docker-compose): Postgres + ClickHouse + Redis + приложение таск-менеджера.
+- **Парсер** (отдельный docker-compose): HTTP-сервис + воркер. Воркер
+  подключается к Redis ядра.
+- **Связь**: воркер парсера читает задачи из Redis-очередей ядра (`BRPOP`) и
+  пишет результаты обратно (`LPUSH`).
 
 Ключевой секрет, общий для обеих частей: **межсервисный ключ**
 (`PARSER_API_KEY` в ядре = `SERVICE_API_KEY` в парсере). Нужен для HTTP-доступа
-к парсеру (синхронный путь). Через Kafka ключ не требуется, но задать его надо
+к парсеру (синхронный путь). Через Redis ключ не требуется, но задать его надо
 одинаковым в обоих `.env`.
 
 ---
@@ -75,16 +77,16 @@ nano .env
 
 ```
 SERVICE_API_KEY=твой-межсервисный-ключ
-KAFKA_ENABLED=true
-KAFKA_BOOTSTRAP_SERVERS=host.docker.internal:9092
-KAFKA_GROUP_ID=ozon-parser-spb
+REDIS_HOST=host.docker.internal
+REDIS_PORT=6379
 OZON_GEO_CODE=spb
 OZON_GEO_NAME=Санкт-Петербург
+PARSER_ID=1
 ```
 
-**Внимание:** `KAFKA_BOOTSTRAP_SERVERS` должен быть `host.docker.internal:9092`
-(не `localhost`, не `:port`). Через `host.docker.internal` контейнер парсера
-достучится до Kafka ядра на хосте.
+**Внимание:** `REDIS_HOST` должен быть `host.docker.internal` (не `localhost`).
+Через `host.docker.internal` контейнер парсера достучится до Redis ядра,
+проброшенного на хост на порт 6379.
 
 Сохранить: `Ctrl+O`, `Enter`, `Ctrl+X`.
 
@@ -106,15 +108,15 @@ docker ps
 
 ### 2.4 Проверить логи воркера
 
-Воркер сейчас будет пытаться подключиться к Kafka, которой ещё нет (ядро не
+Воркер сейчас будет пытаться подключиться к Redis, которого ещё нет (ядро не
 поднято) — это нормально, он ждёт и переподключается.
 
 ```bash
 docker logs mercator_parser-worker-1 --tail 30
 ```
 
-Должно быть `=== Запуск Ozon Kafka-воркера ===` и попытки подключения к
-`host.docker.internal:9092` (пока с ошибками — Kafka ещё нет, это ОК).
+Должно быть `=== Запуск Ozon Redis-воркера ===` и попытки подключения к
+`host.docker.internal:6379` (пока с ошибками — Redis ещё нет, это ОК).
 
 
 ---
@@ -183,8 +185,8 @@ sed -i '1i USE taskmanager;' docker/clickhouse-init/01-schema.sql
 docker compose up -d --build
 ```
 
-Первый раз долго - скачивает образы, собирает jar таск-менеджера, Kafka стартует
-~1-1.5 мин. Дождаться.
+Первый раз долго - скачивает образы, собирает jar таск-менеджера. Дождаться.
+Redis поднимается почти мгновенно.
 
 ### 3.7 Проверить, что всё поднялось
 
@@ -193,7 +195,7 @@ docker compose ps
 ```
 
 Все четыре должны быть `Up`: `tm-postgres (healthy)`, `tm-clickhouse`,
-`tm-kafka (healthy)`, `tm-app`.
+`tm-redis (healthy)`, `tm-app`.
 
 Логи таск-менеджера:
 
@@ -202,7 +204,8 @@ docker compose logs taskmanager --tail 40
 ```
 
 Искать: `Started TaskmanagerApplication`, строки Flyway (миграции Postgres
-накатились сами), `Subscribed to pattern` (консьюмеры подписались).
+накатились сами), `RedisResultListener запущен` (фоновые слушатели результатов
+поднялись).
 
 ### 3.8 Загрузить переменные в сессию
 
@@ -249,10 +252,10 @@ docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" tm-postgres \
 
 ---
 
-## ЧАСТЬ 4. Связать парсер с Kafka
+## ЧАСТЬ 4. Связать парсер с Redis
 
-Теперь Kafka таск-менеджера поднята — воркер парсера должен к ней подключиться. Перезапустить
-воркер, чтобы он переподключился начисто к уже здоровой Kafka:
+Теперь Redis таск-менеджера поднят — воркер парсера должен к нему подключиться.
+Перезапустить воркер, чтобы он переподключился начисто к уже здоровому Redis:
 
 ```bash
 docker restart mercator_parser-worker-1
@@ -265,12 +268,14 @@ docker logs mercator_parser-worker-1 --tail 30
 ```
 
 **Успех выглядит так:**
-- `ResultProducer подключён к host.docker.internal:9092`;
-- `TaskConsumer подписан на ['select.tasks.spb', 'parse.tasks.spb'] | group=ozon-parser-spb`;
-- `Successfully joined group ozon-parser-spb`;
-- `Updated partition assignment: parse.tasks.spb, select.tasks.spb`;
-- **нет** `ECONNREFUSED`.
+- `ResultProducer подключён к Redis host.docker.internal:6379`;
+- `TaskConsumer подключён к Redis host.docker.internal:6379 | ключи=['select:tasks:spb', 'parse:tasks:spb']`;
+- `Воркер запущен | регион=spb (Санкт-Петербург) | роль=primary | parser_id=1`;
+- **нет** ошибок `Connection refused`.
 
+Воркер тянет задачи из общего пула через `BRPOP` (сначала подбор, затем обход) и
+кладёт результаты через `LPUSH`. Партиций и consumer-групп нет — любой свободный
+воркер берёт следующую задачу.
 
 
 ---
@@ -372,12 +377,13 @@ docker exec tm-clickhouse clickhouse-client --database taskmanager \
   --query "SELECT sku, price, quantity, parsed_at FROM measurement LIMIT 5 FORMAT Vertical"
 ```
 
-Если все три счётчика растут — **вся цепочка работает**: CSV → сет → Kafka →
+Если все три счётчика растут — **вся цепочка работает**: CSV → сет → Redis →
 парсер → Postgres + ClickHouse.
 
-Через час после появления карточек автоматически запустится обход (планировщик):
-в логах ТМ появится `Цикл обхода: N активных карточек`, и в `measurement` начнут
-добавляться повторные замеры — временной ряд растёт вглубь.
+После появления карточек автоматически идёт непрерывный обход (потоковый
+доливатель очереди): ядро держит в очереди обхода буфер задач и доливает его по
+мере разбора, выбирая карточки, которых дольше всех не мерили. В `measurement`
+начнут добавляться повторные замеры — временной ряд растёт вглубь.
 
 ---
 
@@ -547,8 +553,8 @@ docker logs tm-app --tail 50
 ```
 
 В логах ТМ видно: `Задача подбора отправлена`, `Результат подбора: ok=true
-найдено=N`, `записано N карточек`, `Партия сета ...: получено N/59`,
-`Цикл обхода: N активных карточек`.
+найдено=N`, `записано N карточек`, `Партия сета ...: получено N/59`, а также
+работу доливателя очереди обхода (постановка задач и `parser_id` в результатах).
 
 ### Логи воркера парсера
 
@@ -561,7 +567,7 @@ docker logs mercator_parser-worker-1 --tail 50
 ```
 
 В логах воркера видно: `SELECT задача query='...'`, `ПОДБОР ЗАВЕРШЁН набрано N
-из M`, `Результат отправлен в select.results.spb`, заходы в карточки.
+из M`, `Результат отправлен в select:results:spb`, заходы в карточки.
 
 
 
@@ -592,131 +598,19 @@ docker logs mercator_parser-worker-1 2>&1 | grep -iE "query|ПОДБОР"
 docker compose logs taskmanager | grep -c "Результат подбора"
 
 ```
----
 
-## ЧАСТЬ 9. Мультипарсер (несколько парсеров на разных IP)
+### Наблюдаемость через Redis
 
-Парсер можно развернуть в нескольких экземплярах, каждый со своим внешним
-IP. Все они читают общий топик задач `parse.tasks.spb` из одной consumer-группы
-`ozon-parser-spb` — Kafka сама раздаёт партиции между воркерами.
-
-Рабочая схема: **2 primary + 1 reserve** (три внешних IP). Primary работают в
-обычном темпе, reserve — в щадящем (бережёт последний свободный IP, ~1 обход в
-сутки в фоне). Роль задаётся в `.env` каждого экземпляра (`PARSER_ROLE`).
-
-### 9.1 Подготовить топик задач
-
-Топик `parse.tasks.spb` должен иметь число партиций не меньше числа воркеров
-(для схемы 2+1 — 3 партиции). При чистом развёртывании это обеспечивает
-`KafkaTopicsConfig` в ядре. Проверить на сервере:
+Вместо consumer-групп Kafka состояние очередей и воркеров смотрится прямо в Redis:
 
 ```bash
-docker exec tm-kafka kafka-topics --bootstrap-server localhost:9092 \
-  --describe --topic parse.tasks.spb
+# сколько задач ждёт разбора (аналог LAG)
+docker exec tm-redis redis-cli LLEN parse:tasks:spb
+docker exec tm-redis redis-cli LLEN select:tasks:spb
+
+# счётчики по воркеру: сделано / поймано антиботом
+docker exec tm-redis redis-cli MGET parser:1:done parser:1:antibot
 ```
-
-Должно быть `PartitionCount: 3`. Если меньше — расширить (партиции можно только
-добавлять, не убавлять):
-
-```bash
-docker exec tm-kafka kafka-topics --bootstrap-server localhost:9092 \
-  --alter --topic parse.tasks.spb --partitions 3
-```
-
-### 9.2 Развернуть экземпляры парсера
-
-Каждый парсер — отдельная папка-клон со своим `.env` и своим профилем Chrome
-(профили нельзя шарить: копят собственные куки Ozon, при общем томе передерутся
-за локи). Первый парсер (`mercator_parser`) — как в части 2. Дополнительные:
-
-```bash
-cd ~
-cp -r mercator_parser mercator_parser2
-cp -r mercator_parser mercator_parser3
-```
-
-Обнулить у копий унаследованный профиль и debug, чтобы каждая копила свои куки:
-
-```bash
-rm -rf ~/mercator_parser2/app/chrome-profile/* ~/mercator_parser2/app/debug/*
-rm -rf ~/mercator_parser3/app/chrome-profile/* ~/mercator_parser3/app/debug/*
-```
-
-Дополнительным экземплярам нужен только воркер (HTTP-сервис `parsing-service`
-достаточно держать в одном экземпляре — иначе копии передерутся за порт 8010).
-Заменить их `docker-compose.yml` на worker-only:
-
-```bash
-cat > ~/mercator_parser2/docker-compose.yml << 'EOF'
-services:
-  worker:
-    build: .
-    init: true
-    command: ["python", "-m", "app.worker.run_worker"]
-    env_file:
-      - .env
-    environment:
-      - TZ=Europe/Moscow
-      - OZON_CHROME_PROFILE_DIR=/app/chrome-profile
-    volumes:
-      - ./app/debug:/app/app/debug
-      - ./app/chrome-profile:/app/chrome-profile
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    restart: unless-stopped
-EOF
-```
-
-То же для `mercator_parser3` (файл идентичный).
-
-### 9.3 Прописать роли
-
-В `.env` каждого экземпляра задать `PARSER_ROLE`:
-
-```bash
-# первый и второй — основные
-grep -q '^PARSER_ROLE=' ~/mercator_parser/.env  && sed -i 's/^PARSER_ROLE=.*/PARSER_ROLE=primary/' ~/mercator_parser/.env  || echo 'PARSER_ROLE=primary' >> ~/mercator_parser/.env
-grep -q '^PARSER_ROLE=' ~/mercator_parser2/.env && sed -i 's/^PARSER_ROLE=.*/PARSER_ROLE=primary/' ~/mercator_parser2/.env || echo 'PARSER_ROLE=primary' >> ~/mercator_parser2/.env
-# третий — запасной
-grep -q '^PARSER_ROLE=' ~/mercator_parser3/.env && sed -i 's/^PARSER_ROLE=.*/PARSER_ROLE=reserve/' ~/mercator_parser3/.env || echo 'PARSER_ROLE=reserve' >> ~/mercator_parser3/.env
-```
-
-Проверить:
-
-```bash
-grep -E '^PARSER_ROLE' ~/mercator_parser/.env ~/mercator_parser2/.env ~/mercator_parser3/.env
-```
-
-### 9.4 Внешние IP (source-based routing)
-
-По умолчанию Docker выпускает исходящий трафик всех контейнеров через один
-(дефолтный) IP хоста — тогда три парсера ходят на Ozon с одного адреса и смысла
-в мультипарсере нет. Чтобы каждый экземпляр выходил со своего внешнего IP,
-на хосте настраивается привязка исходящего трафика к нужному интерфейсу/адресу
-(SNAT или policy-routing) — это делается после того, как сеть выдаст отдельные
-внешние адреса. Связь парсеров с Kafka при этом остаётся внутренней
-(`host.docker.internal:9092`) и от внешних IP не зависит.
-
-### 9.5 Запустить
-
-Собрать образы можно заранее (без запуска трафика на Ozon):
-
-```bash
-cd ~/mercator_parser2 && docker compose build
-cd ~/mercator_parser3 && docker compose build
-```
-
-Поднимать экземпляры имеет смысл только когда готовы внешние IP — иначе они все
-пойдут с одного адреса. После запуска проверить, что все воркеры вошли в группу
-и разобрали партиции:
-
-```bash
-docker exec tm-kafka kafka-consumer-groups --bootstrap-server localhost:9092 \
-  --group ozon-parser-spb --describe
-```
-
-Должны быть три активных члена группы, партиции 0–2 распределены между ними,
-LAG под контролем.
 
 ---
 
@@ -728,18 +622,17 @@ docker compose ps
 
 # логи (ядро)
 docker compose logs taskmanager --tail 50
-docker compose logs kafka --tail 50
+docker compose logs redis --tail 50
 
 # логи парсера
 docker logs mercator_parser-worker-1 --tail 50
 
-# логи дополнительных парсеров (worker-only проекты)
-docker logs mercator_parser2-worker-1 --tail 50
-docker logs mercator_parser3-worker-1 --tail 50
+# длина очередей задач (сколько ждёт разбора)
+docker exec tm-redis redis-cli LLEN parse:tasks:spb
+docker exec tm-redis redis-cli LLEN select:tasks:spb
 
-# кто в группе парсеров и как разобраны партиции
-docker exec tm-kafka kafka-consumer-groups --bootstrap-server localhost:9092 \
-  --group ozon-parser-spb --describe
+# счётчики воркера (сделано / антибот)
+docker exec tm-redis redis-cli MGET parser:1:done parser:1:antibot
 
 # перезапустить приложение после git pull с новым кодом
 git pull && docker compose up -d --build taskmanager
