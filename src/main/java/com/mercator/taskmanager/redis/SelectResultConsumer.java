@@ -1,6 +1,7 @@
 package com.mercator.taskmanager.redis;
 
 import com.mercator.taskmanager.entity.SetClothingEntity;
+import com.mercator.taskmanager.repository.CardRepository;
 import com.mercator.taskmanager.repository.SetClothingRepository;
 import com.mercator.taskmanager.service.CardWriteService;
 import com.mercator.taskmanager.service.FillBatchRegistry;
@@ -27,16 +28,19 @@ public class SelectResultConsumer {
     private final SetClothingRepository stratumRepository;
     private final CardWriteService cardWriteService;
     private final FillBatchRegistry batchRegistry;
+    private final CardRepository cardRepository;
     private final JsonMapper mapper = JsonMapper.builder()
             .propertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE)
             .build();
 
     public SelectResultConsumer(SetClothingRepository stratumRepository,
                                 CardWriteService cardWriteService,
-                                FillBatchRegistry batchRegistry) {
+                                FillBatchRegistry batchRegistry,
+                                CardRepository cardRepository) {
         this.stratumRepository = stratumRepository;
         this.cardWriteService = cardWriteService;
         this.batchRegistry = batchRegistry;
+        this.cardRepository = cardRepository;
     }
 
     /** Обработать одно сообщение результата подбора (JSON). */
@@ -73,8 +77,28 @@ public class SelectResultConsumer {
         }
         SetClothingEntity stratum = stratumOpt.get();
 
+        // Лимит страты: не записывать сверх count. Контроль здесь — единственная
+        // общая точка, через которую проходит каждая подобранная карточка
+        // (и cron-добор, и ручной запуск). Считаем остаток по актуальному active.
+        int active = cardRepository.countByStratumIdAndStatus(stratum.getId(), "active");
+        int remaining = stratum.getCount() - active;
+        if (remaining <= 0) {
+            log.warn("Страта {} ({}) уже укомплектована (active={}, count={}) — "
+                            + "результат task_id={} с {} карточками отброшен целиком",
+                    stratum.getId(), stratum.getQuery(), active, stratum.getCount(),
+                    result.getTaskId(), result.getCards().size());
+            return;
+        }
+
         int saved = 0;
         for (var card : result.getCards()) {
+            if (saved >= remaining) {
+                log.info("Страта {} ({}): лимиt count={} достигнут, "
+                                + "оставшиеся {} карточек из результата не пишем",
+                        stratum.getId(), stratum.getQuery(), stratum.getCount(),
+                        result.getCards().size() - saved);
+                break;
+            }
             try {
                 cardWriteService.saveCard(stratum, result.getGeo(), card);
                 saved++;
@@ -83,8 +107,8 @@ public class SelectResultConsumer {
                         card.getSku(), result.getTaskId(), e.getMessage(), e);
             }
         }
-        log.info("Результат task_id={}: записано {} карточек", result.getTaskId(), saved);
-
+        log.info("Результат task_id={}: записано {} карточек (остаток был {})",
+                result.getTaskId(), saved, remaining);
         batchRegistry.recordResult(result.getSetId(), saved);
     }
 }

@@ -24,6 +24,9 @@ public interface CardRepository extends JpaRepository<CardEntity, UUID> {
     // (парсим только те, что в продаже).
     List<CardEntity> findByStratumIdAndStatus(UUID stratumId, String status);
 
+    // Число активных карточек страты — для контроля лимита count при доборе.
+    int countByStratumIdAndStatus(UUID stratumId, String status);
+
     // Есть ли уже карточка с таким sku в этом сете, в любой его страте
     boolean existsByStratumSetIdAndSku(UUID setId, String sku);
 
