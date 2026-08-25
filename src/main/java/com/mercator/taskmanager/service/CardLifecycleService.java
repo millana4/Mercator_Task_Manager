@@ -47,6 +47,7 @@ public class CardLifecycleService {
             card.setFailedAttempts(0);
             card.setUnavailableSince(null);
             card.setOutOfStockSince(null);
+            card.setDroppedAt(null);
             cardRepository.save(card);
         });
     }
@@ -66,6 +67,7 @@ public class CardLifecycleService {
             if (card.getOutOfStockSince() == null) {
                 card.setOutOfStockSince(now);           // начало отсутствия
                 card.setStatus("active");               // карточка жива
+                card.setDroppedAt(null);
                 cardRepository.save(card);
                 return;
             }
