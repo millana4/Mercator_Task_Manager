@@ -69,7 +69,7 @@ taskmanager:
     refill-interval-ms: ${MONITORING_REFILL_INTERVAL_MS:10000}
     # Окно ожидания результата, мин. Если по отправленной карточке результат
     # не пришёл за это время — она снова становится кандидатом (переотправка).
-    inflight-timeout-minutes: ${MONITORING_INFLIGHT_TIMEOUT_MINUTES:15}
+    inflight-timeout-minutes: ${MONITORING_INFLIGHT_TIMEOUT_MINUTES:45}
   redis:
     # Префиксы ключей списков задач/результатов (гео добавляется в коде).
     parse-tasks-prefix: ${REDIS_PARSE_TASKS_PREFIX:parse:tasks}
