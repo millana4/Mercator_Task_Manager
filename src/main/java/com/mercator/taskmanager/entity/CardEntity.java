@@ -36,7 +36,7 @@ public class CardEntity {
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "stratum_id", nullable = false)
-    private SetClothingEntity stratum;
+    private StratumEntity stratum;
 
     @Column(nullable = false)
     private String sku;

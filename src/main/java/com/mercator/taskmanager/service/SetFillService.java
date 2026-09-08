@@ -4,10 +4,10 @@ import com.mercator.taskmanager.contract.Ozon.OzonCard;
 import com.mercator.taskmanager.contract.Ozon.SelectionResponse;
 import com.mercator.taskmanager.contract.Ozon.StratumRequest;
 import com.mercator.taskmanager.client.OzonParserClient;
-import com.mercator.taskmanager.entity.SetClothingEntity;
 import com.mercator.taskmanager.entity.SetEntity;
-import com.mercator.taskmanager.repository.SetClothingRepository;
+import com.mercator.taskmanager.entity.StratumEntity;
 import com.mercator.taskmanager.repository.SetRepository;
+import com.mercator.taskmanager.repository.StratumRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -25,8 +25,8 @@ import java.util.UUID;
  * с остальными, а не прерывает наполнение целиком.
  *
  * Это синхронный путь, оставленный для ручной отладки. Основной
- * (асинхронный) путь наполнения идёт через Kafka: там задачи уходят
- * в топик, а результаты принимает консьюмер, использующий тот же
+ * (асинхронный) путь наполнения идёт через Redis: там задачи уходят
+ * в список, а результаты принимает консьюмер, использующий тот же
  * CardWriteService. Логика записи карточки у обоих путей общая.
  */
 @Service
@@ -35,12 +35,12 @@ public class SetFillService {
     private static final Logger log = LoggerFactory.getLogger(SetFillService.class);
 
     private final SetRepository setRepository;
-    private final SetClothingRepository stratumRepository;
+    private final StratumRepository stratumRepository;
     private final OzonParserClient parserClient;
     private final CardWriteService cardWriteService;
 
     public SetFillService(SetRepository setRepository,
-                          SetClothingRepository stratumRepository,
+                          StratumRepository stratumRepository,
                           OzonParserClient parserClient,
                           CardWriteService cardWriteService) {
         this.setRepository = setRepository;
@@ -54,11 +54,11 @@ public class SetFillService {
         SetEntity set = setRepository.findById(setId)
                 .orElseThrow(() -> new IllegalArgumentException("Сет не найден: " + setId));
 
-        List<SetClothingEntity> strata = stratumRepository.findBySetId(setId);
+        List<StratumEntity> strata = stratumRepository.findBySubcategorySetId(setId);
         log.info("Наполнение сета {}: {} страт", setId, strata.size());
 
         int totalCards = 0;
-        for (SetClothingEntity stratum : strata) {
+        for (StratumEntity stratum : strata) {
             try {
                 totalCards += fillStratum(set, stratum);
             } catch (Exception e) {
@@ -66,12 +66,13 @@ public class SetFillService {
                         stratum.getItem(), stratum.getId(), e.getMessage(), e);
             }
         }
+
         log.info("Наполнение сета {} завершено: {} карточек", setId, totalCards);
         return totalCards;
     }
 
     /** Наполнить одну страту: позвать парсер и разложить карточки. */
-    private int fillStratum(SetEntity set, SetClothingEntity stratum) {
+    private int fillStratum(SetEntity set, StratumEntity stratum) {
         StratumRequest request = new StratumRequest();
         request.setQuery(stratum.getQuery());
         request.setCount(stratum.getCount());
@@ -90,9 +91,10 @@ public class SetFillService {
 
         int saved = 0;
         for (OzonCard card : response.getCards()) {
-            cardWriteService.saveCard(stratum, set.getGeo(), card);
+            cardWriteService.saveCard(stratum, set.getGeo().getTitle(), card);
             saved++;
         }
+
         log.info("Страта '{}': записано {} из запрошенных {}",
                 stratum.getItem(), saved, stratum.getCount());
         return saved;

@@ -2,13 +2,13 @@ package com.mercator.taskmanager.service;
 
 import com.mercator.taskmanager.contract.Ozon.ExcludedCard;
 import com.mercator.taskmanager.entity.CardEntity;
-import com.mercator.taskmanager.entity.SetClothingEntity;
 import com.mercator.taskmanager.entity.SetEntity;
+import com.mercator.taskmanager.entity.StratumEntity;
 import com.mercator.taskmanager.redis.SelectTaskMessage;
 import com.mercator.taskmanager.redis.SelectTaskProducer;
 import com.mercator.taskmanager.repository.CardRepository;
-import com.mercator.taskmanager.repository.SetClothingRepository;
 import com.mercator.taskmanager.repository.SetRepository;
+import com.mercator.taskmanager.repository.StratumRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -20,9 +20,9 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Асинхронное наполнение сета через Kafka.
+ * Асинхронное наполнение сета через Redis.
  *
- * По каждой страте формирует задачу подбора и отправляет в топик
+ * По каждой страте формирует задачу подбора и отправляет в список задач
  * (не ждёт ответа). Результаты придут асинхронно в SelectResultConsumer.
  * Открывает партию наполнения, чтобы отслеживать, когда все результаты
  * вернутся (или истечёт таймаут).
@@ -33,15 +33,16 @@ public class SetFillRedisService {
     private static final Logger log = LoggerFactory.getLogger(SetFillRedisService.class);
 
     private final SetRepository setRepository;
-    private final SetClothingRepository stratumRepository;
+    private final StratumRepository stratumRepository;
     private final SelectTaskProducer taskProducer;
     private final FillBatchRegistry batchRegistry;
     private final CardRepository cardRepository;
+
     // Таймаут партии — настраиваемый, по умолчанию 4 часа.
     private final Duration batchTimeout;
 
     public SetFillRedisService(SetRepository setRepository,
-                               SetClothingRepository stratumRepository,
+                               StratumRepository stratumRepository,
                                SelectTaskProducer taskProducer,
                                FillBatchRegistry batchRegistry, CardRepository cardRepository,
                                @Value("${taskmanager.fill.batch-timeout:PT4H}") Duration batchTimeout) {
@@ -61,7 +62,7 @@ public class SetFillRedisService {
         SetEntity set = setRepository.findById(setId)
                 .orElseThrow(() -> new IllegalArgumentException("Сет не найден: " + setId));
 
-        List<SetClothingEntity> strata = stratumRepository.findBySetId(setId);
+        List<StratumEntity> strata = stratumRepository.findBySubcategorySetId(setId);
         if (strata.isEmpty()) {
             throw new IllegalArgumentException("У сета нет страт: " + setId);
         }
@@ -71,17 +72,19 @@ public class SetFillRedisService {
 
         // Рассылаем задачи по стратам.
         int sent = 0;
-        for (SetClothingEntity stratum : strata) {
+        for (StratumEntity stratum : strata) {
             SelectTaskMessage task = new SelectTaskMessage();
             task.setTaskId(UUID.randomUUID());
             task.setSetId(setId);
             task.setStratumId(stratum.getId());
-            task.setGeo(set.getGeo());
+            task.setGeo(set.getGeo().getTitle());
+            task.setMarketplace(set.getMarketplace().getTitle());
             task.setQuery(stratum.getQuery());
             task.setCount(stratum.getCount());
             task.setIsSeasonal(stratum.getIsSeasonal());
             task.setBaseShare(stratum.getBaseShare() != null
                     ? stratum.getBaseShare().doubleValue() : null);
+
             // exclude = уже собранные карточки страты. При первом наполнении их нет
             // (пустой список), при доборе — парсер не повторит собранное.
             task.setExclude(buildExclude(stratum.getId()));
@@ -96,7 +99,7 @@ public class SetFillRedisService {
 
     /**
      * Добор недостающих карточек по всем стратам всех сетов.
-     * По каждой страте: если (active + stale) < count — запросить подбор на
+     * По каждой страте: если active < count — запросить подбор на
      * недостающее, с exclude уже известных (включая dropped, чтобы не
      * подбирать повторно выбывшие sku). Партию НЕ открываем — это фоновой
      * добор, а не первичное наполнение.
@@ -106,32 +109,38 @@ public class SetFillRedisService {
     public int refillDeficits() {
         List<SetEntity> sets = setRepository.findAll();
         int sent = 0;
+
         for (SetEntity set : sets) {
-            List<SetClothingEntity> strata = stratumRepository.findBySetId(set.getId());
-            for (SetClothingEntity stratum : strata) {
+            List<StratumEntity> strata = stratumRepository.findBySubcategorySetId(set.getId());
+            for (StratumEntity stratum : strata) {
                 int active = cardRepository
                         .findByStratumIdAndStatus(stratum.getId(), "active").size();
                 int deficit = stratum.getCount() - active;
                 if (deficit <= 0) {
                     continue;
                 }
+
                 SelectTaskMessage task = new SelectTaskMessage();
                 task.setTaskId(UUID.randomUUID());
                 task.setSetId(set.getId());
                 task.setStratumId(stratum.getId());
-                task.setGeo(set.getGeo());
+                task.setGeo(set.getGeo().getTitle());
+                task.setMarketplace(set.getMarketplace().getTitle());
                 task.setQuery(stratum.getQuery());
                 task.setCount(deficit);                       // только недостающее
                 task.setIsSeasonal(stratum.getIsSeasonal());
                 task.setBaseShare(stratum.getBaseShare() != null
                         ? stratum.getBaseShare().doubleValue() : null);
                 task.setExclude(buildExclude(stratum.getId()));
+
                 taskProducer.send(task);
                 sent++;
+
                 log.info("Добор страты {} ({}): недостаёт {} (active={}, need={})",
                         stratum.getId(), stratum.getQuery(), deficit, active, stratum.getCount());
             }
         }
+
         if (sent > 0) {
             log.info("Добор запущен: отправлено {} задач", sent);
         } else {
@@ -144,12 +153,12 @@ public class SetFillRedisService {
     // поэтому исключаем карточки всех страт сета (не только текущей), чтобы
     // парсер не подобрал sku, уже занятый в соседней страте.
     private List<ExcludedCard> buildExclude(UUID stratumId) {
-        SetClothingEntity stratum = stratumRepository.findById(stratumId)
+        StratumEntity stratum = stratumRepository.findById(stratumId)
                 .orElseThrow(() -> new IllegalArgumentException("Страта не найдена: " + stratumId));
-        UUID setId = stratum.getSet().getId();
+        UUID setId = stratum.getSubcategory().getSet().getId();
 
         List<ExcludedCard> exclude = new ArrayList<>();
-        for (SetClothingEntity s : stratumRepository.findBySetId(setId)) {
+        for (StratumEntity s : stratumRepository.findBySubcategorySetId(setId)) {
             for (CardEntity c : cardRepository.findByStratumId(s.getId())) {
                 ExcludedCard ex = new ExcludedCard();
                 ex.setSku(c.getSku());

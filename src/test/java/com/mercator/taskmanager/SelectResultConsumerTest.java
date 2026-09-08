@@ -1,11 +1,9 @@
 package com.mercator.taskmanager;
 
 import com.mercator.taskmanager.entity.CardEntity;
-import com.mercator.taskmanager.entity.SetClothingEntity;
 import com.mercator.taskmanager.entity.SetEntity;
 import com.mercator.taskmanager.redis.SelectResultConsumer;
 import com.mercator.taskmanager.repository.CardRepository;
-import com.mercator.taskmanager.repository.SetClothingRepository;
 import com.mercator.taskmanager.repository.SetRepository;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;

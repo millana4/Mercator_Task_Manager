@@ -1,10 +1,12 @@
 package com.mercator.taskmanager.service;
 
 import com.mercator.taskmanager.entity.CardEntity;
+import com.mercator.taskmanager.entity.MarketplaceEntity;
 import com.mercator.taskmanager.redis.ParseTaskMessage;
 import com.mercator.taskmanager.redis.ParseTaskProducer;
 import com.mercator.taskmanager.redis.RedisKeys;
 import com.mercator.taskmanager.repository.CardRepository;
+import com.mercator.taskmanager.repository.MarketplaceRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -24,18 +26,21 @@ import java.util.UUID;
  * планировщик держит в Redis-очереди небольшой буфер задач и доливает его по
  * мере разбора воркерами.
  *
- * Каждый тик:
- *   1. смотрит длину очереди parse:tasks:<гео> (LLEN);
- *   2. добирает (buffer − LLEN) карточек-кандидатов из Postgres: самые давно
- *      не мерянные (last_measured_at ASC NULLS FIRST), исключая те, что уже
- *      в работе (last_enqueued_at свежее окна ожидания);
- *   3. кладёт задачи в очередь (LPUSH через ParseTaskProducer) и помечает
- *      last_enqueued_at, чтобы не переотправить их следующим тиком.
+ * У каждого маркетплейса своя очередь и свой буфер: парсер, настроенный
+ * только на одну площадку, всегда имеет что взять, и медленная площадка
+ * не тормозит быструю.
+ *
+ * Каждый тик, по каждому маркетплейсу:
+ *   1. смотрит длину очереди parse:tasks:<маркетплейс>:<гео> (LLEN);
+ *   2. добирает (buffer − LLEN) карточек-кандидатов этой площадки из Postgres:
+ *      самые давно не мерянные (last_measured_at ASC NULLS FIRST), исключая
+ *      те, что уже в работе (last_enqueued_at свежее окна ожидания);
+ *   3. кладёт задачи в очередь (LPUSH) и помечает last_enqueued_at.
  *
  * Равномерность: карточку обошли → обновился last_measured_at → она уходит
  * в хвост сортировки → вперёд выходят те, кого дольше не трогали.
- * Потерянные задачи (результат не пришёл) сами вернутся в кандидаты, когда
- * last_enqueued_at выйдет за окно ожидания (inflight-timeout).
+ * Потерянные задачи сами вернутся в кандидаты, когда last_enqueued_at выйдет
+ * за окно ожидания (inflight-timeout).
  */
 @Component
 public class MonitoringScheduler {
@@ -43,6 +48,7 @@ public class MonitoringScheduler {
     private static final Logger log = LoggerFactory.getLogger(MonitoringScheduler.class);
 
     private final CardRepository cardRepository;
+    private final MarketplaceRepository marketplaceRepository;
     private final ParseTaskProducer parseTaskProducer;
     private final StringRedisTemplate redis;
     private final RedisKeys keys;
@@ -52,6 +58,7 @@ public class MonitoringScheduler {
     private final String geo;
 
     public MonitoringScheduler(CardRepository cardRepository,
+                               MarketplaceRepository marketplaceRepository,
                                ParseTaskProducer parseTaskProducer,
                                StringRedisTemplate redis,
                                RedisKeys keys,
@@ -59,6 +66,7 @@ public class MonitoringScheduler {
                                @Value("${taskmanager.monitoring.inflight-timeout-minutes}") long inflightTimeoutMinutes,
                                @Value("${taskmanager.geo}") String geo) {
         this.cardRepository = cardRepository;
+        this.marketplaceRepository = marketplaceRepository;
         this.parseTaskProducer = parseTaskProducer;
         this.redis = redis;
         this.keys = keys;
@@ -74,7 +82,20 @@ public class MonitoringScheduler {
     @Scheduled(fixedDelayString = "${taskmanager.monitoring.refill-interval-ms}", initialDelay = 15_000)
     @Transactional
     public void refill() {
-        String queueKey = keys.parseTasks(geo);
+        for (MarketplaceEntity marketplace : marketplaceRepository.findAll()) {
+            try {
+                refillMarketplace(marketplace);
+            } catch (IllegalArgumentException e) {
+                // Нет кода для ключа — площадку пропускаем, остальные доливаем.
+                log.error("Долив по маркетплейсу '{}' пропущен: {}",
+                        marketplace.getTitle(), e.getMessage());
+            }
+        }
+    }
+
+    private void refillMarketplace(MarketplaceEntity marketplace) {
+        String title = marketplace.getTitle();
+        String queueKey = keys.parseTasks(title, geo);
 
         Long len = redis.opsForList().size(queueKey);
         int inQueue = (len == null) ? 0 : len.intValue();
@@ -86,7 +107,8 @@ public class MonitoringScheduler {
         OffsetDateTime now = OffsetDateTime.now().truncatedTo(ChronoUnit.SECONDS);
         OffsetDateTime threshold = now.minusMinutes(inflightTimeoutMinutes);
 
-        List<CardEntity> candidates = cardRepository.findQueueCandidates(threshold, need);
+        List<CardEntity> candidates = cardRepository
+                .findQueueCandidatesByMarketplace(marketplace.getId(), threshold, need);
         if (candidates.isEmpty()) {
             return;  // нет активных, кого пора обойти
         }
@@ -98,11 +120,12 @@ public class MonitoringScheduler {
             task.setCardId(card.getId());
             task.setSku(card.getSku());
             task.setGeo(geo);
+            task.setMarketplace(title);
+
             parseTaskProducer.send(task);
             enqueuedIds.add(card.getId());
         }
 
-        // Помечаем отправленные: не переотправятся, пока не выйдет окно ожидания.
         cardRepository.markEnqueued(enqueuedIds, now);
 
         log.info("Обход: долив очереди {} — было {}, добавлено {} (буфер {})",

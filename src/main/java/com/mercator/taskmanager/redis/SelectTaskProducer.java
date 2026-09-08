@@ -33,7 +33,7 @@ public class SelectTaskProducer {
 
     public void send(SelectTaskMessage task) {
         String json = mapper.writeValueAsString(task);
-        String key = keys.selectTasks(task.getGeo());
+        String key = keys.selectTasks(task.getMarketplace(), task.getGeo());
         redis.opsForList().leftPush(key, json);
         log.info("Задача подбора отправлена в {}: task_id={}, stratum_id={}, query='{}', geo={}",
                 key, task.getTaskId(), task.getStratumId(), task.getQuery(), task.getGeo());

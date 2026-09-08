@@ -30,7 +30,7 @@ public class ParseTaskProducer {
 
     public void send(ParseTaskMessage task) {
         String json = mapper.writeValueAsString(task);
-        String key = keys.parseTasks(task.getGeo());
+        String key = keys.parseTasks(task.getMarketplace(), task.getGeo());
         redis.opsForList().leftPush(key, json);
         log.info("Задача обхода отправлена в {}: task_id={}, card_id={}, sku={}",
                 key, task.getTaskId(), task.getCardId(), task.getSku());

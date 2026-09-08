@@ -1,5 +1,7 @@
 package com.mercator.taskmanager.redis;
 
+import com.mercator.taskmanager.entity.MarketplaceEntity;
+import com.mercator.taskmanager.repository.MarketplaceRepository;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
@@ -9,16 +11,19 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * Фоновый приём результатов из Redis: на каждый
- * поток результатов (обход, подбор) — свой поток, крутящий блокирующий BRPOP
- * по ключу результатов региона, и передающий JSON соответствующему обработчику.
+ * Фоновый приём результатов из Redis. На каждый маркетплейс из справочника
+ * поднимается два потока — обход и подбор — каждый крутит блокирующий BRPOP
+ * по своему ключу результатов и передаёт JSON соответствующему обработчику.
  *
- * Пока регион один (geo из конфига). Для нескольких регионов здесь заводится
- * по потоку на ключ (или BRPOP по нескольким ключам) — обработчики те же.
+ * Список маркетплейсов читается при старте. Новая площадка появляется в
+ * справочнике при импорте сета, поэтому после первого импорта нового
+ * маркетплейса ядро нужно перезапустить, чтобы слушатель начал читать
+ * его очередь результатов.
  *
  * BRPOP с таймаутом: поток периодически «просыпается», чтобы корректно
  * реагировать на остановку (running=false) и не висеть вечно на выключении.
@@ -33,6 +38,7 @@ public class RedisResultListener {
     private final RedisKeys keys;
     private final ParseResultConsumer parseConsumer;
     private final SelectResultConsumer selectConsumer;
+    private final MarketplaceRepository marketplaceRepository;
     private final String geo;
 
     private volatile boolean running = true;
@@ -42,22 +48,45 @@ public class RedisResultListener {
                                RedisKeys keys,
                                ParseResultConsumer parseConsumer,
                                SelectResultConsumer selectConsumer,
+                               MarketplaceRepository marketplaceRepository,
                                @Value("${taskmanager.geo:Санкт-Петербург}") String geo) {
         this.redis = redis;
         this.keys = keys;
         this.parseConsumer = parseConsumer;
         this.selectConsumer = selectConsumer;
+        this.marketplaceRepository = marketplaceRepository;
         this.geo = geo;
     }
 
     @PostConstruct
     public void start() {
-        pool = Executors.newFixedThreadPool(2);
-        String parseKey = keys.parseResults(geo);
-        String selectKey = keys.selectResults(geo);
-        pool.submit(() -> loop(parseKey, parseConsumer::handle, "обход"));
-        pool.submit(() -> loop(selectKey, selectConsumer::handle, "подбор"));
-        log.info("RedisResultListener запущен: слушаю {} и {}", parseKey, selectKey);
+        List<MarketplaceEntity> marketplaces = marketplaceRepository.findAll();
+        if (marketplaces.isEmpty()) {
+            log.warn("В справочнике нет ни одного маркетплейса — "
+                    + "слушатель результатов не запущен (импортируйте сет и перезапустите ядро)");
+            return;
+        }
+
+        pool = Executors.newFixedThreadPool(marketplaces.size() * 2);
+
+        for (MarketplaceEntity marketplace : marketplaces) {
+            String title = marketplace.getTitle();
+            String parseKey;
+            String selectKey;
+            try {
+                parseKey = keys.parseResults(title, geo);
+                selectKey = keys.selectResults(title, geo);
+            } catch (IllegalArgumentException e) {
+                // Маркетплейс есть в справочнике, но кода для ключа нет —
+                // пропускаем его, остальные слушаем как обычно.
+                log.error("Маркетплейс '{}' пропущен: {}", title, e.getMessage());
+                continue;
+            }
+
+            pool.submit(() -> loop(parseKey, parseConsumer::handle, "обход/" + title));
+            pool.submit(() -> loop(selectKey, selectConsumer::handle, "подбор/" + title));
+            log.info("RedisResultListener: слушаю {} и {}", parseKey, selectKey);
+        }
     }
 
     private void loop(String key, java.util.function.Consumer<String> handler, String label) {

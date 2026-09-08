@@ -2,7 +2,10 @@ package com.mercator.taskmanager.entity;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.FetchType;
 import jakarta.persistence.Id;
+import jakarta.persistence.JoinColumn;
+import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
 import lombok.Getter;
 import lombok.Setter;
@@ -13,28 +16,32 @@ import java.time.OffsetDateTime;
 import java.util.UUID;
 
 /**
- * Сущность сета — строка таблицы "set". Общая шапка задания на сбор
- * (маркетплейс, категория, гео). Одна на регион.
+ * Сущность сета — строка таблицы "set". Общая шапка задания на сбор.
+ * Маркетплейс, категория и гео — ссылки на справочники (раньше были текстом).
  */
-
 @Entity
-@Table(name="set")
+@Table(name = "set")
 @Getter
 @Setter
 public class SetEntity {
+
     @Id
     @UuidGenerator
     @Column(nullable = false, updatable = false)
     private UUID id;
 
-    @Column(nullable = false)
-    private String marketplace;
+    // Справочники маленькие и нужны почти всегда (ключи Redis), поэтому EAGER.
+    @ManyToOne(fetch = FetchType.EAGER, optional = false)
+    @JoinColumn(name = "marketplace_id", nullable = false)
+    private MarketplaceEntity marketplace;
 
-    @Column(nullable = false)
-    private String category;
+    @ManyToOne(fetch = FetchType.EAGER, optional = false)
+    @JoinColumn(name = "category_id", nullable = false)
+    private CategoryEntity category;
 
-    @Column(nullable = false)
-    private String geo;
+    @ManyToOne(fetch = FetchType.EAGER, optional = false)
+    @JoinColumn(name = "geo_id", nullable = false)
+    private GeoEntity geo;
 
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)

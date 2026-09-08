@@ -9,16 +9,13 @@ import java.util.UUID;
 
 /**
  * Доступ к сетам. Наследуя JpaRepository, автоматически получаем
- * save, findById, findAll, delete и т.д. Spring генерирует их сам.
- *
- * Второй параметр UUID — тип первичного ключа сущности.
+ * save, findById, findAll, delete и т.д.
  */
 @Repository
 public interface SetRepository extends JpaRepository<SetEntity, UUID> {
 
-    // Метод, которого нет в базовом наборе: найти сеты по маркетплейсу,
-    // категории и гео. Spring построит SQL по имени метода — ничего писать
-    // не нужно, только объявить сигнатуру.
-    List<SetEntity> findByMarketplaceAndCategoryAndGeo(
+    // Поиск по названиям справочников: Spring идёт по пути
+    // marketplace.title, category.title, geo.title.
+    List<SetEntity> findByMarketplaceTitleAndCategoryTitleAndGeoTitle(
             String marketplace, String category, String geo);
 }

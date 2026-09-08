@@ -4,8 +4,6 @@ import com.mercator.taskmanager.client.OzonParserClient;
 import com.mercator.taskmanager.contract.Ozon.OzonCard;
 import com.mercator.taskmanager.contract.Ozon.SelectionResponse;
 import com.mercator.taskmanager.contract.Ozon.StratumRequest;
-import com.mercator.taskmanager.entity.SetClothingEntity;
-import com.mercator.taskmanager.repository.SetClothingRepository;
 import com.mercator.taskmanager.repository.SetRepository;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Disabled;

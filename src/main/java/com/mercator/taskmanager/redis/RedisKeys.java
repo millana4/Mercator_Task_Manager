@@ -4,9 +4,13 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 /**
- * Строит ключи Redis-списков из префиксов (application.yaml) и кода гео.
- * Ключи списков вида "<prefix>:<geo>", например "parse:tasks:spb".
- * Код гео берём из GeoTopics.codeOf.
+ * Строит ключи Redis-списков из префиксов (application.yaml), кода
+ * маркетплейса и кода гео: "<prefix>:<маркетплейс>:<гео>", например
+ * "parse:tasks:ozon:spb".
+ *
+ * Разделение по маркетплейсам позволяет настроить каждый парсер на свой
+ * набор площадок: воркер делает BRPOP только по тем ключам, которые ему
+ * разрешены в .env.
  */
 @Component
 public class RedisKeys {
@@ -27,8 +31,23 @@ public class RedisKeys {
         this.selectResultsPrefix = selectResultsPrefix;
     }
 
-    public String parseTasks(String geo)   { return parseTasksPrefix   + ":" + GeoTopics.codeOf(geo); }
-    public String parseResults(String geo) { return parseResultsPrefix + ":" + GeoTopics.codeOf(geo); }
-    public String selectTasks(String geo)  { return selectTasksPrefix  + ":" + GeoTopics.codeOf(geo); }
-    public String selectResults(String geo){ return selectResultsPrefix + ":" + GeoTopics.codeOf(geo); }
+    private String key(String prefix, String marketplace, String geo) {
+        return prefix + ":" + MarketplaceTopics.codeOf(marketplace) + ":" + GeoTopics.codeOf(geo);
+    }
+
+    public String parseTasks(String marketplace, String geo) {
+        return key(parseTasksPrefix, marketplace, geo);
+    }
+
+    public String parseResults(String marketplace, String geo) {
+        return key(parseResultsPrefix, marketplace, geo);
+    }
+
+    public String selectTasks(String marketplace, String geo) {
+        return key(selectTasksPrefix, marketplace, geo);
+    }
+
+    public String selectResults(String marketplace, String geo) {
+        return key(selectResultsPrefix, marketplace, geo);
+    }
 }

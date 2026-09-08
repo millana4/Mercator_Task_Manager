@@ -28,7 +28,7 @@ public interface CardRepository extends JpaRepository<CardEntity, UUID> {
     int countByStratumIdAndStatus(UUID stratumId, String status);
 
     // Есть ли уже карточка с таким sku в этом сете, в любой его страте
-    boolean existsByStratumSetIdAndSku(UUID setId, String sku);
+    boolean existsByStratumSubcategorySetIdAndSku(UUID setId, String sku);
 
     // Кандидаты для потокового обхода: активные, которых дольше всех не мерили
     // (NULL — первыми), исключая те, что уже в очереди/в работе (last_enqueued_at
@@ -59,4 +59,23 @@ public interface CardRepository extends JpaRepository<CardEntity, UUID> {
             WHERE id = :id
             """, nativeQuery = true)
     void markMeasured(@Param("id") UUID id, @Param("now") OffsetDateTime now);
+
+    // Кандидаты для обхода в пределах одного маркетплейса: активные, которых
+    // дольше всех не мерили, исключая уже отправленные (last_enqueued_at
+    // свежее порога). Путь до маркетплейса: card → stratum → subcategory → set.
+    @Query(value = """
+            SELECT c.* FROM card c
+            JOIN stratum st ON st.id = c.stratum_id
+            JOIN subcategory sc ON sc.id = st.subcategory_id
+            JOIN "set" s ON s.id = sc.set_id
+            WHERE c.status = 'active'
+              AND s.marketplace_id = :marketplaceId
+              AND (c.last_enqueued_at IS NULL OR c.last_enqueued_at < :threshold)
+            ORDER BY c.last_measured_at ASC NULLS FIRST
+            LIMIT :limit
+            """, nativeQuery = true)
+    List<CardEntity> findQueueCandidatesByMarketplace(
+            @Param("marketplaceId") Short marketplaceId,
+            @Param("threshold") OffsetDateTime threshold,
+            @Param("limit") int limit);
 }

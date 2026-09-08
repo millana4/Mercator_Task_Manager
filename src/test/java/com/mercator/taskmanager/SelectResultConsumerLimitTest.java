@@ -1,12 +1,9 @@
 package com.mercator.taskmanager;
 
 import com.mercator.taskmanager.contract.Ozon.OzonCard;
-import com.mercator.taskmanager.entity.SetClothingEntity;
-import com.mercator.taskmanager.entity.SetEntity;
 import com.mercator.taskmanager.redis.SelectResultConsumer;
 import com.mercator.taskmanager.redis.SelectResultMessage;
 import com.mercator.taskmanager.repository.CardRepository;
-import com.mercator.taskmanager.repository.SetClothingRepository;
 import com.mercator.taskmanager.service.CardWriteService;
 import com.mercator.taskmanager.service.FillBatchRegistry;
 import org.junit.jupiter.api.Test;

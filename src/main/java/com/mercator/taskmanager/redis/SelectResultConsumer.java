@@ -1,8 +1,8 @@
 package com.mercator.taskmanager.redis;
 
-import com.mercator.taskmanager.entity.SetClothingEntity;
+import com.mercator.taskmanager.entity.StratumEntity;
 import com.mercator.taskmanager.repository.CardRepository;
-import com.mercator.taskmanager.repository.SetClothingRepository;
+import com.mercator.taskmanager.repository.StratumRepository;
 import com.mercator.taskmanager.service.CardWriteService;
 import com.mercator.taskmanager.service.FillBatchRegistry;
 import org.slf4j.Logger;
@@ -25,15 +25,16 @@ public class SelectResultConsumer {
 
     private static final Logger log = LoggerFactory.getLogger(SelectResultConsumer.class);
 
-    private final SetClothingRepository stratumRepository;
+    private final StratumRepository stratumRepository;
     private final CardWriteService cardWriteService;
     private final FillBatchRegistry batchRegistry;
     private final CardRepository cardRepository;
+
     private final JsonMapper mapper = JsonMapper.builder()
             .propertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE)
             .build();
 
-    public SelectResultConsumer(SetClothingRepository stratumRepository,
+    public SelectResultConsumer(StratumRepository stratumRepository,
                                 CardWriteService cardWriteService,
                                 FillBatchRegistry batchRegistry,
                                 CardRepository cardRepository) {
@@ -68,14 +69,14 @@ public class SelectResultConsumer {
             return;
         }
 
-        Optional<SetClothingEntity> stratumOpt =
+        Optional<StratumEntity> stratumOpt =
                 stratumRepository.findById(result.getStratumId());
         if (stratumOpt.isEmpty()) {
             log.error("Страта {} не найдена — результат task_id={} отброшен",
                     result.getStratumId(), result.getTaskId());
             return;
         }
-        SetClothingEntity stratum = stratumOpt.get();
+        StratumEntity stratum = stratumOpt.get();
 
         // Лимит страты: не записывать сверх count. Контроль здесь — единственная
         // общая точка, через которую проходит каждая подобранная карточка
@@ -93,7 +94,7 @@ public class SelectResultConsumer {
         int saved = 0;
         for (var card : result.getCards()) {
             if (saved >= remaining) {
-                log.info("Страта {} ({}): лимиt count={} достигнут, "
+                log.info("Страта {} ({}): лимит count={} достигнут, "
                                 + "оставшиеся {} карточек из результата не пишем",
                         stratum.getId(), stratum.getQuery(), stratum.getCount(),
                         result.getCards().size() - saved);
@@ -107,8 +108,10 @@ public class SelectResultConsumer {
                         card.getSku(), result.getTaskId(), e.getMessage(), e);
             }
         }
+
         log.info("Результат task_id={}: записано {} карточек (остаток был {})",
                 result.getTaskId(), saved, remaining);
+
         batchRegistry.recordResult(result.getSetId(), saved);
     }
 }
