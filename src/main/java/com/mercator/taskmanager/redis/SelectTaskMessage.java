@@ -24,6 +24,7 @@ public class SelectTaskMessage {
     private UUID stratumId;
     private String geo;
     private String marketplace;
+    private String category;
 
     private String query;
     private Integer count;

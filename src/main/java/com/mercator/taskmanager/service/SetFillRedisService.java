@@ -79,6 +79,7 @@ public class SetFillRedisService {
             task.setStratumId(stratum.getId());
             task.setGeo(set.getGeo().getTitle());
             task.setMarketplace(set.getMarketplace().getTitle());
+            task.setCategory(set.getCategory().getTitle());
             task.setQuery(stratum.getQuery());
             task.setCount(stratum.getCount());
             task.setIsSeasonal(stratum.getIsSeasonal());
@@ -126,6 +127,7 @@ public class SetFillRedisService {
                 task.setStratumId(stratum.getId());
                 task.setGeo(set.getGeo().getTitle());
                 task.setMarketplace(set.getMarketplace().getTitle());
+                task.setCategory(set.getCategory().getTitle());
                 task.setQuery(stratum.getQuery());
                 task.setCount(deficit);                       // только недостающее
                 task.setIsSeasonal(stratum.getIsSeasonal());
