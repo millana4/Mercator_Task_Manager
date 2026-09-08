@@ -14,6 +14,7 @@ public final class MarketplaceTopics {
 
     private static final Map<String, String> MARKETPLACE_TO_CODE = Map.of(
             "Ozon", "ozon",
+            "ozon", "ozon",
             "Детский мир", "detmir",
             "Wildberries", "wb",
             "Яндекс Маркет", "yandex"
