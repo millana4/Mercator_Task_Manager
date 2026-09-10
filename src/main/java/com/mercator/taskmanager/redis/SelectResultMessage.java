@@ -22,7 +22,7 @@ public class SelectResultMessage {
     private UUID setId;
     private UUID stratumId;
     private String geo;
-
+    private String parserId;
     private Boolean ok;
     private Integer requestedCount;
     private Integer foundCount;

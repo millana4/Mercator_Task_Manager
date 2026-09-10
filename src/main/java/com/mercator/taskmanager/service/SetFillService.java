@@ -91,7 +91,7 @@ public class SetFillService {
 
         int saved = 0;
         for (OzonCard card : response.getCards()) {
-            cardWriteService.saveCard(stratum, set.getGeo().getTitle(), card);
+            cardWriteService.saveCard(stratum, set.getGeo().getTitle(), card, null);
             saved++;
         }
 

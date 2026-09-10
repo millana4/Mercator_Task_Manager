@@ -101,7 +101,7 @@ public class SelectResultConsumer {
                 break;
             }
             try {
-                cardWriteService.saveCard(stratum, result.getGeo(), card);
+                cardWriteService.saveCard(stratum, result.getGeo(), card, result.getParserId());
                 saved++;
             } catch (Exception e) {
                 log.error("Карточка sku={} не записана (task_id={}): {}",

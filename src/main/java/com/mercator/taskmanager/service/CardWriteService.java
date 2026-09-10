@@ -45,8 +45,8 @@ public class CardWriteService {
         this.json = json;
     }
 
-    /** Записать карточку под стратой, с гео для замера. */
-    public void saveCard(StratumEntity stratum, String geo, OzonCard card) {
+    /** Записать карточку под стратой, с гео для замера и меткой парсера. */
+    public void saveCard(StratumEntity stratum, String geo, OzonCard card, String parserId) {
         // Инвариант: один sku в сете максимум один раз. Если такой sku уже
         // есть (в этой или другой страте сета) — не пишем дубль.
         UUID setId = stratum.getSubcategory().getSet().getId();
@@ -84,6 +84,7 @@ public class CardWriteService {
                 .quantity(card.getQuantity())
                 .rating(parseFloat(card.getRating()))
                 .reviewsCount(parseInt(card.getReviewsCount()))
+                .parserId(parserId)
                 .build();
         measurementRepository.insert(m);
 
