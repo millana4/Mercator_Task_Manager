@@ -54,12 +54,15 @@ services:
     container_name: tm-redis
     ports:
       - "6379:6379"          # нужен наружу — к нему подключаются парсеры-воркеры
-    command: ["redis-server", "--appendonly", "yes"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    command: >
+      sh -c 'exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"'
     volumes:
       - redis-data:/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -79,6 +82,7 @@ services:
     environment:
       SPRING_DATA_REDIS_HOST: "tm-redis"
       SPRING_DATA_REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
       SPRING_DATASOURCE_URL: "jdbc:postgresql://tm-postgres:5432/taskmanager"
       SPRING_DATASOURCE_USERNAME: "taskmanager"
       SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
