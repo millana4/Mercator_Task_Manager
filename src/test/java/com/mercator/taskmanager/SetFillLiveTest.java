@@ -4,7 +4,9 @@ import com.mercator.taskmanager.client.OzonParserClient;
 import com.mercator.taskmanager.contract.Ozon.OzonCard;
 import com.mercator.taskmanager.contract.Ozon.SelectionResponse;
 import com.mercator.taskmanager.contract.Ozon.StratumRequest;
+import com.mercator.taskmanager.entity.StratumEntity;
 import com.mercator.taskmanager.repository.SetRepository;
+import com.mercator.taskmanager.repository.StratumRepository;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Disabled;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -27,7 +29,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class SetFillLiveTest {
 
     @Autowired SetRepository setRepository;
-    @Autowired SetClothingRepository stratumRepository;
+    @Autowired StratumRepository stratumRepository;
     @Autowired OzonParserClient parserClient;
 
     @Test
@@ -38,10 +40,10 @@ class SetFillLiveTest {
                 "Нет ни одного сета. Залей CSV через curl перед этим тестом.");
         var set = sets.get(0);
 
-        // 2. Берём первую страту сета.
-        List<SetClothingEntity> strata = stratumRepository.findBySetId(set.getId());
+        // 2. Берём первую страту сета (через подкатегории).
+        List<StratumEntity> strata = stratumRepository.findBySubcategorySetId(set.getId());
         assertFalse(strata.isEmpty(), "У сета нет страт");
-        SetClothingEntity stratum = strata.get(0);
+        StratumEntity stratum = strata.get(0);
 
         System.out.println(">>> Пробуем страту: " + stratum.getItem()
                 + " (запрос: '" + stratum.getQuery() + "', нужно " + stratum.getCount() + ")");

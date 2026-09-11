@@ -1,6 +1,9 @@
 package com.mercator.taskmanager;
 
 import com.mercator.taskmanager.entity.SetEntity;
+import com.mercator.taskmanager.entity.StratumEntity;
+import com.mercator.taskmanager.entity.SubcategoryEntity;
+import com.mercator.taskmanager.repository.StratumRepository;
 import com.mercator.taskmanager.service.SetImportService;
 import com.mercator.taskmanager.set_csv.StratumCsvParser;
 import com.mercator.taskmanager.set_csv.StratumRow;
@@ -16,9 +19,9 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Сквозной тест приёма CSV: реальный файл → парсер → сервис → Postgres.
- * Проверяет, что сет создался с заданными marketplace/category/geo,
- * и что все страты из файла записались и привязаны к сету.
+ * Сквозной тест приёма плоского CSV: реальный файл → парсер → сервис → Postgres.
+ * Проверяет, что сет создался со ссылками на справочники, каждая страта
+ * завёрнута в подкатегорию-обёртку, а пол и слой уехали в attrs подкатегории.
  *
  * Наследует PostgresTestBase — поднимает временный Postgres через Testcontainers.
  */
@@ -28,7 +31,7 @@ class SetImportServiceTest extends PostgresTestBase {
 
     @Autowired StratumCsvParser parser;
     @Autowired SetImportService importService;
-    @Autowired SetClothingRepository stratumRepository;
+    @Autowired StratumRepository stratumRepository;
 
     @Test
     @Transactional
@@ -43,33 +46,38 @@ class SetImportServiceTest extends PostgresTestBase {
         SetEntity set = importService.importSet(
                 "ozon", "clothing", "Санкт-Петербург", rows);
 
-        // 3. Сет создан с id и заданными атрибутами.
+        // 3. Сет создан с id, справочники подставлены по названиям.
         assertNotNull(set.getId(), "У сохранённого сета должен быть id");
-        assertEquals("ozon", set.getMarketplace());
-        assertEquals("clothing", set.getCategory());
-        assertEquals("Санкт-Петербург", set.getGeo());
+        assertEquals("ozon", set.getMarketplace().getTitle());
+        assertEquals("clothing", set.getCategory().getTitle());
+        assertEquals("Санкт-Петербург", set.getGeo().getTitle());
 
-        // 4. Все страты записались и привязаны к этому сету.
-        List<SetClothingEntity> saved = stratumRepository.findBySetId(set.getId());
+        // 4. Все страты записались и привязаны к этому сету через подкатегории.
+        List<StratumEntity> saved = stratumRepository.findBySubcategorySetId(set.getId());
         assertEquals(rows.size(), saved.size(),
                 "Число страт в базе должно совпасть с числом строк CSV");
 
-        // 5. Проверяем, что данные страт долетели корректно — на примере первой.
-        SetClothingEntity firstSaved = saved.stream()
+        // 5. Проверяем, что данные страты долетели корректно — на примере первой.
+        StratumEntity firstSaved = saved.stream()
                 .filter(s -> "Трусы".equals(s.getItem()))
                 .findFirst()
                 .orElseThrow(() -> new AssertionError("Не нашли страту 'Трусы'"));
         assertEquals("Трусы женские", firstSaved.getQuery());
-        assertEquals("f", firstSaved.getGender());
-        assertEquals((short) 0, firstSaved.getLayer());
         assertFalse(firstSaved.getIsSeasonal());
         assertNull(firstSaved.getBaseShare());
 
-        // 6. Инвариант БД сработал: у всех сохранённых страт, где есть доля базы,
+        // 6. Пол и слой теперь в attrs подкатегории-обёртки.
+        SubcategoryEntity subcategory = firstSaved.getSubcategory();
+        assertEquals("Трусы", subcategory.getTitle(),
+                "Подкатегория-обёртка называется как предмет");
+        assertEquals("f", subcategory.getAttrs().get("segment"));
+        assertEquals(0, ((Number) subcategory.getAttrs().get("layer")).intValue());
+
+        // 7. Инвариант БД сработал: у всех сохранённых страт, где есть доля базы,
         //    сезонность = true (иначе CHECK в базе не пропустил бы вставку).
         assertTrue(saved.stream()
                         .filter(s -> s.getBaseShare() != null)
-                        .allMatch(SetClothingEntity::getIsSeasonal),
+                        .allMatch(StratumEntity::getIsSeasonal),
                 "Доля базы только у сезонных");
     }
 }

@@ -39,8 +39,8 @@ public class FakeParserForTest {
     @PostConstruct
     void start() {
         pool = Executors.newSingleThreadExecutor();
-        String taskKey = keys.selectTasks("Санкт-Петербург");
-        String resultKey = keys.selectResults("Санкт-Петербург");
+        String taskKey = keys.selectTasks("ozon", "Санкт-Петербург");
+        String resultKey = keys.selectResults("ozon", "Санкт-Петербург");
         pool.submit(() -> loop(taskKey, resultKey));
     }
 
@@ -58,6 +58,7 @@ public class FakeParserForTest {
                       "set_id": "%s",
                       "stratum_id": "%s",
                       "geo": "%s",
+                      "marketplace": "%s",
                       "ok": true,
                       "requested_count": %d,
                       "found_count": 1,
@@ -67,7 +68,7 @@ public class FakeParserForTest {
                       ]
                     }
                     """.formatted(task.getTaskId(), task.getSetId(), task.getStratumId(),
-                        task.getGeo(), task.getCount(), sku);
+                        task.getGeo(), task.getMarketplace(), task.getCount(), sku);
 
                 redis.opsForList().leftPush(resultKey, resultJson);
                 System.out.println(">>> FakeParser ответил на task_id=" + task.getTaskId());

@@ -17,7 +17,8 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Отправляет задачу подбора через SelectTaskProducer и проверяет, что она
- * реально легла в Redis-список select:tasks:spb. Живой Redis (Testcontainers).
+ * реально легла в Redis-список select:tasks:ozon:spb. Ключ строится из
+ * маркетплейса и гео задачи. Живой Redis (Testcontainers).
  */
 @Tag("integration")
 @ActiveProfiles("test")
@@ -30,13 +31,15 @@ class SelectTaskProducerTest extends PostgresTestBase {
 
     @Test
     void sendsSelectTaskToRedis() {
-        String key = keys.selectTasks("Санкт-Петербург");
+        String key = keys.selectTasks("ozon", "Санкт-Петербург");
         redis.delete(key);  // чистим перед проверкой
 
         SelectTaskMessage task = new SelectTaskMessage();
         task.setTaskId(UUID.randomUUID());
         task.setStratumId(UUID.randomUUID());
         task.setGeo("Санкт-Петербург");
+        task.setMarketplace("ozon");     // по нему продюсер выберет ключ
+        task.setCategory("clothing");
         task.setQuery("Трусы женские");
         task.setCount(4);
         task.setIsSeasonal(false);

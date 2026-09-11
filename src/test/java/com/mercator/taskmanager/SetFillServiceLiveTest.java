@@ -4,15 +4,22 @@ import com.mercator.taskmanager.clickhouse.MeasurementRepository;
 import com.mercator.taskmanager.clickhouse.CardSnapshotRepository;
 import com.mercator.taskmanager.entity.CardEntity;
 import com.mercator.taskmanager.entity.SetEntity;
+import com.mercator.taskmanager.entity.StratumEntity;
+import com.mercator.taskmanager.entity.SubcategoryEntity;
 import com.mercator.taskmanager.repository.CardRepository;
 import com.mercator.taskmanager.repository.SetRepository;
+import com.mercator.taskmanager.repository.StratumRepository;
+import com.mercator.taskmanager.repository.SubcategoryRepository;
+import com.mercator.taskmanager.service.ReferenceResolver;
 import com.mercator.taskmanager.service.SetFillService;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -22,38 +29,49 @@ import static org.junit.jupiter.api.Assertions.*;
  * что карточки записаны в Postgres (card) и ClickHouse (measurement).
  *
  * Требует запущенных Postgres, ClickHouse и ПАРСЕРА. Медленный (Selenium).
- * За собой убирает созданный сет (каскадно удалит страты и карточки Postgres).
+ * За собой убирает созданный сет (каскадно удалит подкатегории, страты
+ * и карточки Postgres).
  */
 @SpringBootTest
 @Disabled("Живой тест наполнения — запускать вручную, требует парсера")
 class SetFillServiceLiveTest {
 
     @Autowired SetRepository setRepository;
-    @Autowired SetClothingRepository stratumRepository;
+    @Autowired SubcategoryRepository subcategoryRepository;
+    @Autowired StratumRepository stratumRepository;
     @Autowired CardRepository cardRepository;
     @Autowired MeasurementRepository measurementRepository;
     @Autowired CardSnapshotRepository snapshotRepository;
     @Autowired SetFillService fillService;
+    @Autowired ReferenceResolver references;
 
     @Test
     void fillsTinySetFromLiveParser() {
-        // 1. Создаём крошечный сет с одной стратой.
+        // 1. Создаём крошечный сет с одной подкатегорией и одной стратой.
         SetEntity set = new SetEntity();
-        set.setMarketplace("ozon");
-        set.setCategory("clothing");
-        set.setGeo("Санкт-Петербург");
+        set.setMarketplace(references.marketplace("ozon"));
+        set.setCategory(references.category("clothing"));
+        set.setGeo(references.geo("Санкт-Петербург"));
         SetEntity savedSet = setRepository.save(set);
 
-        SetClothingEntity stratum = new SetClothingEntity();
-        stratum.setSet(savedSet);
+        Map<String, Object> attrs = new HashMap<>();
+        attrs.put("segment", "m");
+        attrs.put("layer", 0);
+
+        SubcategoryEntity subcategory = new SubcategoryEntity();
+        subcategory.setSet(savedSet);
+        subcategory.setTitle("Носки");
+        subcategory.setAttrs(attrs);
+        SubcategoryEntity savedSubcategory = subcategoryRepository.save(subcategory);
+
+        StratumEntity stratum = new StratumEntity();
+        stratum.setSubcategory(savedSubcategory);
         stratum.setItem("Носки");
         stratum.setQuery("Носки мужские");
         stratum.setCount(2);              // всего 2 карточки — быстрее
-        stratum.setGender("m");
-        stratum.setLayer((short) 0);
         stratum.setIsSeasonal(false);
         stratum.setBaseShare(null);
-        SetClothingEntity savedStratum = stratumRepository.save(stratum);
+        StratumEntity savedStratum = stratumRepository.save(stratum);
 
         try {
             // 2. Наполняем сет.
@@ -78,7 +96,7 @@ class SetFillServiceLiveTest {
             }
 
         } finally {
-            // 5. Убираем за собой сет (страты и карточки Postgres удалятся каскадом).
+            // 5. Убираем за собой сет (подкатегории, страты и карточки удалятся каскадом).
             // Замеры/снимки в ClickHouse останутся — они append-only, это норма для теста.
             setRepository.deleteById(savedSet.getId());
         }

@@ -1,9 +1,11 @@
 package com.mercator.taskmanager;
 
 import com.mercator.taskmanager.contract.Ozon.OzonCard;
+import com.mercator.taskmanager.entity.StratumEntity;
 import com.mercator.taskmanager.redis.SelectResultConsumer;
 import com.mercator.taskmanager.redis.SelectResultMessage;
 import com.mercator.taskmanager.repository.CardRepository;
+import com.mercator.taskmanager.repository.StratumRepository;
 import com.mercator.taskmanager.service.CardWriteService;
 import com.mercator.taskmanager.service.FillBatchRegistry;
 import org.junit.jupiter.api.Test;
@@ -15,8 +17,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 /**
@@ -33,7 +34,7 @@ class SelectResultConsumerLimitTest {
 
     @Test
     void limitCutsOverflow() throws Exception {
-        SetClothingRepository stratumRepo = mock(SetClothingRepository.class);
+        StratumRepository stratumRepo = mock(StratumRepository.class);
         CardWriteService cardWriteService = mock(CardWriteService.class);
         FillBatchRegistry batchRegistry = mock(FillBatchRegistry.class);
         CardRepository cardRepository = mock(CardRepository.class);
@@ -44,7 +45,7 @@ class SelectResultConsumerLimitTest {
         UUID stratumId = UUID.randomUUID();
         UUID setId = UUID.randomUUID();
 
-        SetClothingEntity stratum = new SetClothingEntity();
+        StratumEntity stratum = new StratumEntity();
         stratum.setId(stratumId);
         stratum.setQuery("Джинсы мужские");
         stratum.setCount(2);                         // план — 2 карточки
@@ -57,15 +58,16 @@ class SelectResultConsumerLimitTest {
 
         consumer.handle(json);
 
-        // Записаны только 2 из 5 — лимит сработал.
+        // Записаны только 2 из 5 — лимит сработал. Четвёртый аргумент — метка
+        // парсера из результата (в тестовом JSON её нет, поэтому null).
         verify(cardWriteService, times(2))
-                .saveCard(eq(stratum), eq("Санкт-Петербург"), any(OzonCard.class));
+                .saveCard(eq(stratum), eq("Санкт-Петербург"), any(OzonCard.class), isNull());
         verify(batchRegistry).recordResult(eq(setId), eq(2));
     }
 
     @Test
     void fullStratumDropsWholeResult() throws Exception {
-        SetClothingRepository stratumRepo = mock(SetClothingRepository.class);
+        StratumRepository stratumRepo = mock(StratumRepository.class);
         CardWriteService cardWriteService = mock(CardWriteService.class);
         FillBatchRegistry batchRegistry = mock(FillBatchRegistry.class);
         CardRepository cardRepository = mock(CardRepository.class);
@@ -76,7 +78,7 @@ class SelectResultConsumerLimitTest {
         UUID stratumId = UUID.randomUUID();
         UUID setId = UUID.randomUUID();
 
-        SetClothingEntity stratum = new SetClothingEntity();
+        StratumEntity stratum = new StratumEntity();
         stratum.setId(stratumId);
         stratum.setQuery("Носки мужские");
         stratum.setCount(3);
@@ -91,7 +93,7 @@ class SelectResultConsumerLimitTest {
 
         // Ничего не записано — результат отброшен целиком.
         verify(cardWriteService, never())
-                .saveCard(any(), anyString(), any(OzonCard.class));
+                .saveCard(any(), anyString(), any(OzonCard.class), any());
     }
 
     // Собрать JSON результата подбора с нужным числом карточек.
