@@ -43,6 +43,7 @@ services:
       - ch-data:/var/lib/clickhouse
       - ./backups:/backups
       - ./docker/clickhouse-init:/docker-entrypoint-initdb.d   # авто-накат схемы при первом старте
+      - ./docker/clickhouse-users:/etc/clickhouse-server/users.d
     restart: unless-stopped
     ulimits:
       nofile:
