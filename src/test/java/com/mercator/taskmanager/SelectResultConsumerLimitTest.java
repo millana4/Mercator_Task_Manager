@@ -8,6 +8,7 @@ import com.mercator.taskmanager.repository.CardRepository;
 import com.mercator.taskmanager.repository.StratumRepository;
 import com.mercator.taskmanager.service.CardWriteService;
 import com.mercator.taskmanager.service.FillBatchRegistry;
+import com.mercator.taskmanager.service.NicheSelectionService;
 import org.junit.jupiter.api.Test;
 import tools.jackson.databind.PropertyNamingStrategies;
 import tools.jackson.databind.json.JsonMapper;
@@ -21,10 +22,11 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 /**
- * Юнит-тест лимита count при приёме подбора. Проверяет отсечение в
- * SelectResultConsumer.handle(): сверх count страты карточки не пишутся.
- * Зависимости мокнуты (без Postgres/ClickHouse) — тест изолирует ровно
- * логику лимита.
+ * Юнит-тест приёма подбора в SelectResultConsumer.handle():
+ *  - лимит count страты — сверх count карточки не пишутся;
+ *  - результат без stratum_id, не принадлежащий нише, пропускается.
+ * Зависимости мокнуты (без Postgres/ClickHouse). NicheSelectionService —
+ * мок: isSelectTask по умолчанию false, результат идёт веткой страты.
  */
 class SelectResultConsumerLimitTest {
 
@@ -38,9 +40,10 @@ class SelectResultConsumerLimitTest {
         CardWriteService cardWriteService = mock(CardWriteService.class);
         FillBatchRegistry batchRegistry = mock(FillBatchRegistry.class);
         CardRepository cardRepository = mock(CardRepository.class);
+        NicheSelectionService nicheSelection = mock(NicheSelectionService.class);
 
         SelectResultConsumer consumer = new SelectResultConsumer(
-                stratumRepo, cardWriteService, batchRegistry, cardRepository);
+                stratumRepo, cardWriteService, batchRegistry, cardRepository, nicheSelection);
 
         UUID stratumId = UUID.randomUUID();
         UUID setId = UUID.randomUUID();
@@ -71,9 +74,10 @@ class SelectResultConsumerLimitTest {
         CardWriteService cardWriteService = mock(CardWriteService.class);
         FillBatchRegistry batchRegistry = mock(FillBatchRegistry.class);
         CardRepository cardRepository = mock(CardRepository.class);
+        NicheSelectionService nicheSelection = mock(NicheSelectionService.class);
 
         SelectResultConsumer consumer = new SelectResultConsumer(
-                stratumRepo, cardWriteService, batchRegistry, cardRepository);
+                stratumRepo, cardWriteService, batchRegistry, cardRepository, nicheSelection);
 
         UUID stratumId = UUID.randomUUID();
         UUID setId = UUID.randomUUID();
@@ -94,6 +98,29 @@ class SelectResultConsumerLimitTest {
         // Ничего не записано — результат отброшен целиком.
         verify(cardWriteService, never())
                 .saveCard(any(), anyString(), any(OzonCard.class), any());
+    }
+
+    @Test
+    void resultWithoutStratumIsSkipped() throws Exception {
+        StratumRepository stratumRepo = mock(StratumRepository.class);
+        CardWriteService cardWriteService = mock(CardWriteService.class);
+        FillBatchRegistry batchRegistry = mock(FillBatchRegistry.class);
+        CardRepository cardRepository = mock(CardRepository.class);
+        NicheSelectionService nicheSelection = mock(NicheSelectionService.class);
+
+        SelectResultConsumer consumer = new SelectResultConsumer(
+                stratumRepo, cardWriteService, batchRegistry, cardRepository, nicheSelection);
+
+        // Запоздавший ответ на заменённую задачу ниши: stratum_id пуст,
+        // task_id нише уже не принадлежит (isSelectTask → false).
+        String json = buildResultJson(null, null, 3);
+
+        consumer.handle(json);
+
+        verify(stratumRepo, never()).findById(any());
+        verify(cardWriteService, never())
+                .saveCard(any(), anyString(), any(OzonCard.class), any());
+        verify(batchRegistry, never()).recordResult(any(), anyInt());
     }
 
     // Собрать JSON результата подбора с нужным числом карточек.
