@@ -14,5 +14,3 @@ CREATE TABLE niche_llm_log (
     error         text,                    -- причина неудачи
     created_at    timestamptz NOT NULL DEFAULT now()
 );
-
-CREATE INDEX idx_niche_llm_log_niche ON niche_llm_log (niche_id, created_at);

@@ -5,6 +5,7 @@ import com.mercator.taskmanager.repository.CardRepository;
 import com.mercator.taskmanager.repository.StratumRepository;
 import com.mercator.taskmanager.service.CardWriteService;
 import com.mercator.taskmanager.service.FillBatchRegistry;
+import com.mercator.taskmanager.service.NicheSelectionService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -16,6 +17,10 @@ import java.util.Optional;
 /**
  * Обрабатывает результат подбора (пришёл из Redis-списка select:results:<гео>).
  * Раскладывает карточки через CardWriteService, отмечает партию наполнения.
+ *
+ * Результат подбора ниши (task_id принадлежит нише) уходит в NicheSelectionService.
+ * Результат без stratum_id, не принадлежащий нише (запоздавший ответ на заменённую
+ * задачу ниши), пропускается.
  *
  * Транспорт (BRPOP из Redis) — в RedisResultListener; здесь только логика.
  * Привязка результата к страте — по stratum_id из сообщения (эхо парсера).
@@ -29,6 +34,7 @@ public class SelectResultConsumer {
     private final CardWriteService cardWriteService;
     private final FillBatchRegistry batchRegistry;
     private final CardRepository cardRepository;
+    private final NicheSelectionService nicheSelectionService;
 
     private final JsonMapper mapper = JsonMapper.builder()
             .propertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE)
@@ -37,11 +43,13 @@ public class SelectResultConsumer {
     public SelectResultConsumer(StratumRepository stratumRepository,
                                 CardWriteService cardWriteService,
                                 FillBatchRegistry batchRegistry,
-                                CardRepository cardRepository) {
+                                CardRepository cardRepository,
+                                NicheSelectionService nicheSelectionService) {
         this.stratumRepository = stratumRepository;
         this.cardWriteService = cardWriteService;
         this.batchRegistry = batchRegistry;
         this.cardRepository = cardRepository;
+        this.nicheSelectionService = nicheSelectionService;
     }
 
     /** Обработать одно сообщение результата подбора (JSON). */
@@ -52,6 +60,20 @@ public class SelectResultConsumer {
         } catch (Exception e) {
             log.error("Не разобрать результат подбора, сообщение пропущено: {}", e.getMessage());
             return;  // битое сообщение пропускаем, не застреваем
+        }
+
+        // Результат подбора ниши — отдельная ветка.
+        if (nicheSelectionService.isSelectTask(result.getTaskId())) {
+            nicheSelectionService.handleResult(result);
+            return;
+        }
+
+        // Без stratum_id привязать карточки не к чему: запоздавший ответ на задачу
+        // подбора ниши, которую уже заменили повторной отправкой.
+        if (result.getStratumId() == null) {
+            log.warn("Результат подбора без stratum_id пропущен: task_id={} (parser_id={})",
+                    result.getTaskId(), result.getParserId());
+            return;
         }
 
         log.info("Результат подбора: task_id={}, stratum_id={}, ok={}, найдено={}",

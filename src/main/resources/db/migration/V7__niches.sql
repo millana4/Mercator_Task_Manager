@@ -3,7 +3,7 @@
 --                      признаки те же, что у сета: маркетплейс, категория, гео
 -- niche_stratum_hint — страты, которые предложила нейросеть
 -- niche_candidate    — все кандидаты подбора с эмбеддингом и близостью (источник автодобора)
--- card.niche_id      — карточка в нише; у карточки заполнена страта, ниша или обе
+-- card.niche_id      — ниша, для которой карточка создана (уточнено в V9)
 
 -- ---------- 1. Ниша ----------
 CREATE TABLE niche (
@@ -22,7 +22,7 @@ CREATE TABLE niche (
     status             text NOT NULL DEFAULT 'new',
     error              text,                   -- причина статуса failed
     reference_task_id  uuid,                   -- задача парсинга референса
-    select_task_id     uuid,                   -- текущая задача подбора (первичный или автодобор)
+    select_task_id     uuid,                   -- текущая задача подбора
     created_at         timestamptz NOT NULL DEFAULT now(),
     updated_at         timestamptz NOT NULL DEFAULT now(),
     deleted_at         timestamptz,
@@ -34,13 +34,6 @@ CREATE TABLE niche (
         CHECK (status IN ('new', 'reference_parsing', 'query_generation', 'selecting',
                           'ranking', 'active', 'failed', 'deleted'))
 );
-
-CREATE INDEX idx_niche_mp_cat_geo ON niche (marketplace_id, category_id, geo_id);
-CREATE INDEX idx_niche_status ON niche (status);
-CREATE INDEX idx_niche_reference_task ON niche (reference_task_id)
-    WHERE reference_task_id IS NOT NULL;
-CREATE INDEX idx_niche_select_task ON niche (select_task_id)
-    WHERE select_task_id IS NOT NULL;
 
 -- ---------- 2. Страты, предложенные нейросетью ----------
 CREATE TABLE niche_stratum_hint (
@@ -70,10 +63,7 @@ CREATE TABLE niche_candidate (
         CHECK (status IN ('candidate', 'selected', 'unavailable'))
 );
 
-CREATE INDEX idx_niche_candidate_verify_task ON niche_candidate (verify_task_id)
-    WHERE verify_task_id IS NOT NULL;
-
--- ---------- 4. Карточка: страта, ниша или обе ----------
+-- ---------- 4. Карточка: страта или ниша ----------
 ALTER TABLE card ALTER COLUMN stratum_id DROP NOT NULL;
 ALTER TABLE card ADD COLUMN niche_id uuid REFERENCES niche(id) ON DELETE CASCADE;
 ALTER TABLE card ADD CONSTRAINT card_stratum_or_niche_check
@@ -81,6 +71,4 @@ ALTER TABLE card ADD CONSTRAINT card_stratum_or_niche_check
 
 -- (stratum_id, sku) не проверяет карточки без страты — уникальность sku внутри ниши
 CREATE UNIQUE INDEX card_niche_sku_unique ON card (niche_id, sku)
-    WHERE niche_id IS NOT NULL;
-CREATE INDEX idx_card_niche_id ON card (niche_id)
     WHERE niche_id IS NOT NULL;

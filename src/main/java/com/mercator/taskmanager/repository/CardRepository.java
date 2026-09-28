@@ -2,13 +2,14 @@ package com.mercator.taskmanager.repository;
 
 import com.mercator.taskmanager.entity.CardEntity;
 import org.springframework.data.jpa.repository.JpaRepository;
-import org.springframework.stereotype.Repository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
-import java.time.OffsetDateTime;
+import org.springframework.stereotype.Repository;
 
+import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 /** Доступ к карточкам. */
@@ -64,8 +65,8 @@ public interface CardRepository extends JpaRepository<CardEntity, UUID> {
     // дольше всех не мерили, исключая уже отправленные (last_enqueued_at
     // свежее порога).
     // Маркетплейс карточки: из сета через card → stratum → subcategory → set,
-    // а у карточки без страты — из ниши. LEFT JOIN, чтобы карточки без страты
-    // (только в нише) тоже попадали в обход.
+    // а у карточки без страты — из ниши-создателя. LEFT JOIN, чтобы карточки
+    // без страты тоже попадали в обход.
     @Query(value = """
             SELECT c.* FROM card c
             LEFT JOIN stratum st ON st.id = c.stratum_id
@@ -83,19 +84,74 @@ public interface CardRepository extends JpaRepository<CardEntity, UUID> {
             @Param("threshold") OffsetDateTime threshold,
             @Param("limit") int limit);
 
-    // Удаление ниши: у карточек страт снять нишу (карточка остаётся в страте).
+    // Карточка с таким sku на маркетплейсе (в любой страте или нише), активная — первой.
+    // Для кандидатов ниши из выдачи: не заводить дубль уже существующей карточки.
+    @Query(value = """
+            SELECT c.* FROM card c
+            LEFT JOIN stratum st ON st.id = c.stratum_id
+            LEFT JOIN subcategory sc ON sc.id = st.subcategory_id
+            LEFT JOIN "set" s ON s.id = sc.set_id
+            LEFT JOIN niche n ON n.id = c.niche_id
+            WHERE c.sku = :sku
+              AND COALESCE(s.marketplace_id, n.marketplace_id) = :marketplaceId
+            ORDER BY (c.status = 'active') DESC
+            LIMIT 1
+            """, nativeQuery = true)
+    Optional<CardEntity> findBySkuAndMarketplace(@Param("sku") String sku,
+                                                 @Param("marketplaceId") Short marketplaceId);
+
+    // ---------- Состав ниш (niche_card) ----------
+
+    // Включить карточку в нишу (повторное включение ничего не меняет).
     @Modifying
     @Query(value = """
-            UPDATE card SET niche_id = NULL
-            WHERE niche_id = :nicheId AND stratum_id IS NOT NULL
+            INSERT INTO niche_card (niche_id, card_id) VALUES (:nicheId, :cardId)
+            ON CONFLICT DO NOTHING
             """, nativeQuery = true)
-    int detachStratumCardsFromNiche(@Param("nicheId") UUID nicheId);
+    int addToNiche(@Param("nicheId") UUID nicheId, @Param("cardId") UUID cardId);
 
-    // Удаление ниши: карточки только этой ниши выбывают из обхода.
+    // Исключить карточку из ниши.
+    @Modifying
+    @Query(value = """
+            DELETE FROM niche_card WHERE niche_id = :nicheId AND card_id = :cardId
+            """, nativeQuery = true)
+    int removeFromNiche(@Param("nicheId") UUID nicheId, @Param("cardId") UUID cardId);
+
+    // В скольких нишах состоит карточка.
+    @Query(value = "SELECT count(*) FROM niche_card WHERE card_id = :cardId", nativeQuery = true)
+    long countNiches(@Param("cardId") UUID cardId);
+
+    // Число активных карточек в нише.
+    @Query(value = """
+            SELECT count(*) FROM niche_card nc
+            JOIN card c ON c.id = nc.card_id
+            WHERE nc.niche_id = :nicheId AND c.status = 'active'
+            """, nativeQuery = true)
+    long countActiveInNiche(@Param("nicheId") UUID nicheId);
+
+    // Удаление ниши, шаг 1: убрать весь её состав.
+    @Modifying
+    @Query(value = "DELETE FROM niche_card WHERE niche_id = :nicheId", nativeQuery = true)
+    int removeAllFromNiche(@Param("nicheId") UUID nicheId);
+
+    // Удаление ниши, шаг 2: карточки, созданные для неё и входящие в другие ниши,
+    // передать одной из этих ниш (они остаются в обходе).
+    @Modifying
+    @Query(value = """
+            UPDATE card c
+            SET niche_id = (SELECT nc.niche_id FROM niche_card nc
+                            WHERE nc.card_id = c.id
+                            ORDER BY nc.added_at LIMIT 1)
+            WHERE c.niche_id = :nicheId
+              AND EXISTS (SELECT 1 FROM niche_card nc WHERE nc.card_id = c.id)
+            """, nativeQuery = true)
+    int transferOwnedCards(@Param("nicheId") UUID nicheId);
+
+    // Удаление ниши, шаг 3: оставшиеся карточки, созданные для неё, выбывают из обхода.
     @Modifying
     @Query(value = """
             UPDATE card SET status = 'dropped', dropped_at = :now
-            WHERE niche_id = :nicheId AND stratum_id IS NULL AND status <> 'dropped'
+            WHERE niche_id = :nicheId AND status <> 'dropped'
             """, nativeQuery = true)
-    int dropNicheOnlyCards(@Param("nicheId") UUID nicheId, @Param("now") OffsetDateTime now);
+    int dropOwnedCards(@Param("nicheId") UUID nicheId, @Param("now") OffsetDateTime now);
 }

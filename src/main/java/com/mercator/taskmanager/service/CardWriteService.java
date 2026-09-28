@@ -6,6 +6,7 @@ import com.mercator.taskmanager.clickhouse.Measurement;
 import com.mercator.taskmanager.clickhouse.MeasurementRepository;
 import com.mercator.taskmanager.contract.Ozon.OzonCard;
 import com.mercator.taskmanager.entity.CardEntity;
+import com.mercator.taskmanager.entity.NicheEntity;
 import com.mercator.taskmanager.entity.StratumEntity;
 import com.mercator.taskmanager.repository.CardRepository;
 import org.springframework.stereotype.Service;
@@ -24,6 +25,9 @@ import org.slf4j.LoggerFactory;
  * Выделено из SetFillService, чтобы пользоваться и при синхронном
  * наполнении, и при приёме результатов из Redis. Порядок важен:
  * сначала Postgres (даёт UUID), потом два ClickHouse с этим UUID.
+ *
+ * saveCard — карточка страты; saveNicheCard — карточка, найденная для ниши
+ * (без страты). Проверку дубля sku для ниши делает вызывающий код.
  */
 @Service
 public class CardWriteService {
@@ -56,11 +60,26 @@ public class CardWriteService {
             return;
         }
 
-        OffsetDateTime now = OffsetDateTime.now();
-
-        // 1. Postgres: паспорт карточки (даёт UUID).
-        CardEntity entity = new CardEntity();
+        CardEntity entity = newCardEntity(card);
         entity.setStratum(stratum);
+        CardEntity savedCard = cardRepository.save(entity);
+
+        writeMeasurementAndSnapshot(savedCard.getId(), geo, card, parserId);
+    }
+
+    /** Записать карточку, найденную для ниши (без страты). Возвращает созданную карточку. */
+    public CardEntity saveNicheCard(NicheEntity niche, String geo, OzonCard card, String parserId) {
+        CardEntity entity = newCardEntity(card);
+        entity.setNiche(niche);
+        CardEntity savedCard = cardRepository.save(entity);
+
+        writeMeasurementAndSnapshot(savedCard.getId(), geo, card, parserId);
+        return savedCard;
+    }
+
+    // Паспорт карточки (Postgres) без привязки к страте/нише.
+    private CardEntity newCardEntity(OzonCard card) {
+        CardEntity entity = new CardEntity();
         entity.setSku(card.getSku());
         entity.setName(card.getName());
         entity.setUrl(card.getUrl());
@@ -68,11 +87,14 @@ public class CardWriteService {
         entity.setCollection(resolveCollection(card));
         entity.setStatus("active");
         entity.setFailedAttempts(0);
+        return entity;
+    }
 
-        CardEntity savedCard = cardRepository.save(entity);
-        UUID cardId = savedCard.getId();
+    // ClickHouse: замер + снимок для уже сохранённой карточки.
+    private void writeMeasurementAndSnapshot(UUID cardId, String geo, OzonCard card, String parserId) {
+        OffsetDateTime now = OffsetDateTime.now();
 
-        // 2. ClickHouse: замер.
+        // 1. Замер.
         Measurement m = Measurement.builder()
                 .cardId(cardId)
                 .sku(card.getSku())
@@ -84,11 +106,11 @@ public class CardWriteService {
                 .quantity(card.getQuantity())
                 .rating(parseFloat(card.getRating()))
                 .reviewsCount(parseInt(card.getReviewsCount()))
-                .parserId(parserId)
+                .parserId(parserId != null ? parserId : "")
                 .build();
         measurementRepository.insert(m);
 
-        // 3. ClickHouse: снимок.
+        // 2. Снимок.
         CardSnapshot snap = CardSnapshot.builder()
                 .cardId(cardId)
                 .sku(card.getSku())

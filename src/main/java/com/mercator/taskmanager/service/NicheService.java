@@ -109,8 +109,10 @@ public class NicheService {
     }
 
     /**
-     * Мягкое удаление: статус deleted, у карточек страт снимается ниша,
-     * карточки только этой ниши выбывают из обхода (dropped).
+     * Мягкое удаление: статус deleted; состав ниши (niche_card) очищается;
+     * карточки, созданные для неё и входящие в другие ниши, передаются одной
+     * из этих ниш; остальные созданные для неё карточки выбывают (dropped).
+     * Карточки страт остаются в стратах.
      *
      * @return false — ниша не найдена
      */
@@ -125,14 +127,16 @@ public class NicheService {
         }
 
         OffsetDateTime now = OffsetDateTime.now();
-        int detached = cardRepository.detachStratumCardsFromNiche(niche.getId());
-        int dropped = cardRepository.dropNicheOnlyCards(niche.getId(), now);
+        int removed = cardRepository.removeAllFromNiche(niche.getId());
+        int transferred = cardRepository.transferOwnedCards(niche.getId());
+        int dropped = cardRepository.dropOwnedCards(niche.getId(), now);
 
         niche.setStatus(NicheStatus.DELETED);
         niche.setDeletedAt(now);
 
-        log.info("Ниша удалена: id={}, external_id={}; снята с карточек страт: {}, выбыло карточек ниши: {}",
-                niche.getId(), externalId, detached, dropped);
+        log.info("Ниша удалена: id={}, external_id={}; убрано из состава: {}, "
+                        + "передано другим нишам: {}, выбыло: {}",
+                niche.getId(), externalId, removed, transferred, dropped);
         return true;
     }
 

@@ -78,17 +78,25 @@ taskmanager:
     select-tasks-prefix: ${REDIS_SELECT_TASKS_PREFIX:select:tasks}
     select-results-prefix: ${REDIS_SELECT_RESULTS_PREFIX:select:results}
   niche:
-    # Размер ниши. Временные значения — до исследования размера ниши (этап 5).
-    # target-count — сколько карточек нужно для анализа,
-    # plan-count — сколько держать на парсинге (с запасом).
+    # Размер ниши: target-count — сколько карточек нужно для анализа,
+    # plan-count — сколько держать на парсинге (с запасом на выбывание).
     target-count: ${NICHE_TARGET_COUNT:30}
     plan-count: ${NICHE_PLAN_COUNT:40}
+    # Кандидатов из выдачи набирается plan-count × candidate-multiplier,
+    # из них по близости к референсу в нише остаётся plan-count.
+    candidate-multiplier: ${NICHE_CANDIDATE_MULTIPLIER:2}
+    # Размер одной задачи подбора кандидатов (пачки).
+    select-batch-size: ${NICHE_SELECT_BATCH_SIZE:10}
     # Как часто планировщик ниш продвигает ниши по статусам, мс.
     scheduler-interval-ms: ${NICHE_SCHEDULER_INTERVAL_MS:30000}
     # Сколько неудачных обращений к нейросети допускается, затем ниша failed.
     llm-max-attempts: ${NICHE_LLM_MAX_ATTEMPTS:3}
     # Пауза после неудачного обращения к нейросети перед повтором, мин.
     llm-retry-delay-minutes: ${NICHE_LLM_RETRY_DELAY_MINUTES:5}
+    # Окно ожидания результата пачки подбора, ч. Затем задача отправляется повторно.
+    select-timeout-hours: ${NICHE_SELECT_TIMEOUT_HOURS:3}
+    # Пауза после неудачного подбора перед повтором, мин.
+    select-retry-delay-minutes: ${NICHE_SELECT_RETRY_DELAY_MINUTES:30}
 yandex:
   ai:
     # Yandex AI Studio, OpenAI-совместимый Chat Completions API
@@ -99,3 +107,9 @@ yandex:
     temperature: ${YANDEX_TEMPERATURE:0.2}
     max-tokens: ${YANDEX_MAX_TOKENS:500}
     timeout-seconds: ${YANDEX_TIMEOUT_SECONDS:60}
+embedder:
+  # Сервис эмбеддингов (mercator_embedder), контейнер emb-app в сети ядра.
+  # Ключ — тот же межсервисный PARSER_API_KEY.
+  url: ${EMBEDDER_URL:http://emb-app:8000}
+  # С запасом: первый запрос после простоя загружает модель.
+  timeout-seconds: ${EMBEDDER_TIMEOUT_SECONDS:600}

@@ -2,12 +2,17 @@ package com.mercator.taskmanager.clickhouse;
 
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowCallbackHandler;
 import org.springframework.stereotype.Repository;
 
 import java.sql.Timestamp;
 import java.time.temporal.ChronoUnit;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * Доступ к снимкам карточек в ClickHouse (таблица card_snapshot).
@@ -26,6 +31,11 @@ public class CardSnapshotRepository {
     public CardSnapshotRepository(
             @Qualifier("clickhouseJdbcTemplate") JdbcTemplate clickhouseJdbcTemplate) {
         this.clickhouse = clickhouseJdbcTemplate;
+    }
+
+    /** Поля последнего снимка карточки, нужные для текста эмбеддинга. */
+    public record SnapshotText(String name, String categoryPath,
+                               String characteristics, String description) {
     }
 
     public void insert(CardSnapshot s) {
@@ -65,6 +75,41 @@ public class CardSnapshotRepository {
                 "SELECT count() FROM card_snapshot FINAL WHERE card_id = ?",
                 Long.class, cardId);
         return count != null ? count : 0L;
+    }
+
+    /**
+     * Текстовые поля последнего снимка по каждой карточке — для эмбеддингов.
+     * Последняя версия — argMax по parsed_at (не зависит от того, схлопнул ли
+     * ReplacingMergeTree версии). Характеристики склеиваются в строку в SQL:
+     * до 15 пар «ключ: значение» через «; ».
+     */
+    public Map<UUID, SnapshotText> findTextsByCardIds(Collection<UUID> cardIds) {
+        Map<UUID, SnapshotText> result = new HashMap<>();
+        if (cardIds == null || cardIds.isEmpty()) {
+            return result;
+        }
+        String placeholders = String.join(", ", Collections.nCopies(cardIds.size(), "?"));
+        String sql =
+                "SELECT card_id, " +
+                        "argMax(name, parsed_at) AS name, " +
+                        "argMax(category_path, parsed_at) AS category_path, " +
+                        "argMax(description, parsed_at) AS description, " +
+                        "argMax(arrayStringConcat(arraySlice(arrayMap((k, v) -> concat(k, ': ', v), " +
+                        "mapKeys(characteristics), mapValues(characteristics)), 1, 15), '; '), " +
+                        "parsed_at) AS chars " +
+                        "FROM card_snapshot " +
+                        "WHERE card_id IN (" + placeholders + ") " +
+                        "GROUP BY card_id";
+
+        clickhouse.query(sql, (RowCallbackHandler) rs -> result.put(
+                        UUID.fromString(rs.getString("card_id")),
+                        new SnapshotText(
+                                rs.getString("name"),
+                                rs.getString("category_path"),
+                                rs.getString("chars"),
+                                rs.getString("description"))),
+                cardIds.toArray());
+        return result;
     }
 
     // --- вспомогательное ---
