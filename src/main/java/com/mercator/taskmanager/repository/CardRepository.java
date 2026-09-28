@@ -62,14 +62,18 @@ public interface CardRepository extends JpaRepository<CardEntity, UUID> {
 
     // Кандидаты для обхода в пределах одного маркетплейса: активные, которых
     // дольше всех не мерили, исключая уже отправленные (last_enqueued_at
-    // свежее порога). Путь до маркетплейса: card → stratum → subcategory → set.
+    // свежее порога).
+    // Маркетплейс карточки: из сета через card → stratum → subcategory → set,
+    // а у карточки без страты — из ниши. LEFT JOIN, чтобы карточки без страты
+    // (только в нише) тоже попадали в обход.
     @Query(value = """
             SELECT c.* FROM card c
-            JOIN stratum st ON st.id = c.stratum_id
-            JOIN subcategory sc ON sc.id = st.subcategory_id
-            JOIN "set" s ON s.id = sc.set_id
+            LEFT JOIN stratum st ON st.id = c.stratum_id
+            LEFT JOIN subcategory sc ON sc.id = st.subcategory_id
+            LEFT JOIN "set" s ON s.id = sc.set_id
+            LEFT JOIN niche n ON n.id = c.niche_id
             WHERE c.status = 'active'
-              AND s.marketplace_id = :marketplaceId
+              AND COALESCE(s.marketplace_id, n.marketplace_id) = :marketplaceId
               AND (c.last_enqueued_at IS NULL OR c.last_enqueued_at < :threshold)
             ORDER BY c.last_measured_at ASC NULLS FIRST
             LIMIT :limit
@@ -78,4 +82,20 @@ public interface CardRepository extends JpaRepository<CardEntity, UUID> {
             @Param("marketplaceId") Short marketplaceId,
             @Param("threshold") OffsetDateTime threshold,
             @Param("limit") int limit);
+
+    // Удаление ниши: у карточек страт снять нишу (карточка остаётся в страте).
+    @Modifying
+    @Query(value = """
+            UPDATE card SET niche_id = NULL
+            WHERE niche_id = :nicheId AND stratum_id IS NOT NULL
+            """, nativeQuery = true)
+    int detachStratumCardsFromNiche(@Param("nicheId") UUID nicheId);
+
+    // Удаление ниши: карточки только этой ниши выбывают из обхода.
+    @Modifying
+    @Query(value = """
+            UPDATE card SET status = 'dropped', dropped_at = :now
+            WHERE niche_id = :nicheId AND stratum_id IS NULL AND status <> 'dropped'
+            """, nativeQuery = true)
+    int dropNicheOnlyCards(@Param("nicheId") UUID nicheId, @Param("now") OffsetDateTime now);
 }

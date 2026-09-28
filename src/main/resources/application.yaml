@@ -77,3 +77,11 @@ taskmanager:
     parse-results-prefix: ${REDIS_PARSE_RESULTS_PREFIX:parse:results}
     select-tasks-prefix: ${REDIS_SELECT_TASKS_PREFIX:select:tasks}
     select-results-prefix: ${REDIS_SELECT_RESULTS_PREFIX:select:results}
+  niche:
+    # Размер ниши. Временные значения — до исследования размера ниши (этап 5).
+    # target-count — сколько карточек нужно для анализа,
+    # plan-count — сколько держать на парсинге (с запасом).
+    target-count: ${NICHE_TARGET_COUNT:30}
+    plan-count: ${NICHE_PLAN_COUNT:40}
+    # Как часто планировщик ниш продвигает ниши по статусам, мс.
+    scheduler-interval-ms: ${NICHE_SCHEDULER_INTERVAL_MS:30000}

@@ -4,6 +4,7 @@ import com.mercator.taskmanager.clickhouse.Measurement;
 import com.mercator.taskmanager.clickhouse.MeasurementRepository;
 import com.mercator.taskmanager.repository.CardRepository;
 import com.mercator.taskmanager.service.CardLifecycleService;
+import com.mercator.taskmanager.service.NicheReferenceService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -20,6 +21,11 @@ import java.time.temporal.ChronoUnit;
  * проставляет last_measured_at (для потокового обхода).
  * На неудачу: помечает карточку через жизненный цикл.
  *
+ * Результат парсинга референса ниши (task_id принадлежит нише) уходит
+ * в NicheReferenceService — замер по нему не пишется. Результат без card_id,
+ * не принадлежащий нише (запоздавший ответ на заменённую задачу референса),
+ * пропускается.
+ *
  * Транспорт (BRPOP из Redis) — в RedisResultListener; здесь только логика.
  */
 @Component
@@ -30,16 +36,19 @@ public class ParseResultConsumer {
     private final MeasurementRepository measurementRepository;
     private final CardLifecycleService lifecycle;
     private final CardRepository cardRepository;
+    private final NicheReferenceService nicheReferenceService;
     private final JsonMapper mapper = JsonMapper.builder()
             .propertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE)
             .build();
 
     public ParseResultConsumer(MeasurementRepository measurementRepository,
                                CardLifecycleService lifecycle,
-                               CardRepository cardRepository) {
+                               CardRepository cardRepository,
+                               NicheReferenceService nicheReferenceService) {
         this.measurementRepository = measurementRepository;
         this.lifecycle = lifecycle;
         this.cardRepository = cardRepository;
+        this.nicheReferenceService = nicheReferenceService;
     }
 
     /** Обработать одно сообщение результата обхода (JSON). */
@@ -50,6 +59,20 @@ public class ParseResultConsumer {
             result = mapper.readValue(json, ParseResultMessage.class);
         } catch (Exception e) {
             log.error("Не разобрать результат обхода: {}", e.getMessage());
+            return;
+        }
+
+        // Результат парсинга референса ниши — отдельная ветка, замер не пишется.
+        if (nicheReferenceService.isReferenceTask(result.getTaskId())) {
+            nicheReferenceService.handleResult(result);
+            return;
+        }
+
+        // Без card_id привязать замер не к чему: запоздавший ответ на задачу
+        // референса, которую уже заменили повторной отправкой.
+        if (result.getCardId() == null) {
+            log.warn("Результат обхода без card_id пропущен: task_id={}, sku={} (parser_id={})",
+                    result.getTaskId(), result.getSku(), result.getParserId());
             return;
         }
 

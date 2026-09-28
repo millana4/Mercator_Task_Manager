@@ -16,12 +16,13 @@ import java.time.OffsetDateTime;
 import java.util.UUID;
 
 /**
- * Сущность карточки — подобранный парсером SKU
- * под конкретную страту. name — последнее известное имя (снимок).
+ * Сущность карточки — SKU, подобранный парсером под страту и/или нишу.
+ * name — последнее известное имя (снимок).
  * seller_id и collection нужны для формирования exclude при доборе.
  * Блок жизненного цикла: status, failedAttempts, отметки времени.
  *
- * Связь: много карточек → одна страта (@ManyToOne).
+ * Связи: у карточки заполнена страта, ниша или обе
+ * (ограничение card_stratum_or_niche_check в базе).
  */
 @Entity
 @Table(name = "card")
@@ -35,8 +36,12 @@ public class CardEntity {
     private UUID id;
 
     @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "stratum_id", nullable = false)
+    @JoinColumn(name = "stratum_id")
     private StratumEntity stratum;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "niche_id")
+    private NicheEntity niche;
 
     @Column(nullable = false)
     private String sku;
