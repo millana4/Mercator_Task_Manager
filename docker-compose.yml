@@ -92,6 +92,8 @@ services:
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
       PARSER_OZON_URL: "http://host.docker.internal:8010"
       PARSER_API_KEY: ${PARSER_API_KEY}
+      YANDEX_API_KEY: ${YANDEX_API_KEY}
+      YANDEX_FOLDER_ID: ${YANDEX_FOLDER_ID}
       TZ: "Europe/Moscow"
     restart: unless-stopped
     extra_hosts:

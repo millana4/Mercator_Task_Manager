@@ -85,3 +85,17 @@ taskmanager:
     plan-count: ${NICHE_PLAN_COUNT:40}
     # Как часто планировщик ниш продвигает ниши по статусам, мс.
     scheduler-interval-ms: ${NICHE_SCHEDULER_INTERVAL_MS:30000}
+    # Сколько неудачных обращений к нейросети допускается, затем ниша failed.
+    llm-max-attempts: ${NICHE_LLM_MAX_ATTEMPTS:3}
+    # Пауза после неудачного обращения к нейросети перед повтором, мин.
+    llm-retry-delay-minutes: ${NICHE_LLM_RETRY_DELAY_MINUTES:5}
+yandex:
+  ai:
+    # Yandex AI Studio, OpenAI-совместимый Chat Completions API
+    api-url: ${YANDEX_API_URL:https://llm.api.cloud.yandex.net/v1}
+    api-key: ${YANDEX_API_KEY:}
+    folder-id: ${YANDEX_FOLDER_ID:}
+    model: ${YANDEX_MODEL:deepseek-v4-flash}
+    temperature: ${YANDEX_TEMPERATURE:0.2}
+    max-tokens: ${YANDEX_MAX_TOKENS:500}
+    timeout-seconds: ${YANDEX_TIMEOUT_SECONDS:60}
