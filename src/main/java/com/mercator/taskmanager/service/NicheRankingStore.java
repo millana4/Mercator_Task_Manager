@@ -22,9 +22,9 @@ import java.util.Optional;
 import java.util.UUID;
 
 /**
- * Транзакционная часть ранжирования ниши: чтение кандидатов, сохранение
- * эмбеддингов, применение отбора. Обращение к эмбеддеру — вне транзакции,
- * в NicheRankingService.
+ * Транзакционная часть ранжирования и автодобора ниши: чтение кандидатов,
+ * сохранение эмбеддингов, применение отбора. Обращение к эмбеддеру — вне
+ * транзакции, в NicheRankingService.
  *
  * Состав ниши — niche_card: карточка может входить в несколько ниш.
  */
@@ -59,8 +59,16 @@ public class NicheRankingStore {
     public record Embedded(UUID candidateId, String text, float[] vector, double similarity) {
     }
 
-    /** Итог применения отбора. */
+    /** Итог применения отбора (первичный подбор). */
     public record ApplyResult(int selected, int added, int removed, int skipped) {
+    }
+
+    /** Задача проверочного парсинга исторического кандидата. */
+    public record VerifyTask(UUID candidateId, UUID taskId, String sku) {
+    }
+
+    /** Итог прохода автодобора. */
+    public record RefillResult(int taken, int unavailable, List<VerifyTask> toVerify) {
     }
 
     @Transactional(readOnly = true)
@@ -91,7 +99,7 @@ public class NicheRankingStore {
     }
 
     /**
-     * Применить отбор: первые plan-count из rankedIds (по убыванию близости) —
+     * Первичный подбор: первые plan-count из rankedIds (по убыванию близости) —
      * выборка ниши, остальные ранее отобранные выбывают. Затем статус ниши:
      * done — active, иначе selecting с очищенной задачей (следующая пачка).
      *
@@ -104,11 +112,7 @@ public class NicheRankingStore {
             return null;
         }
 
-        Map<UUID, NicheCandidateEntity> byId = new HashMap<>();
-        for (NicheCandidateEntity c : candidateRepository.findByNicheId(nicheId)) {
-            byId.put(c.getId(), c);
-        }
-
+        Map<UUID, NicheCandidateEntity> byId = candidatesById(nicheId);
         int planCount = niche.getPlanCount();
         int selected = 0, added = 0, removed = 0, skipped = 0;
 
@@ -140,22 +144,143 @@ public class NicheRankingStore {
             }
         }
 
-        if (done) {
-            niche.setStatus(NicheStatus.ACTIVE);
-        } else {
-            niche.setStatus(NicheStatus.SELECTING);
-            niche.setSelectTaskId(null);  // планировщик отправит следующую пачку
-        }
+        // Задача пачки обработана. При active — чтобы автодобор видел, что поиск
+        // не идёт; при selecting — планировщик отправит следующую пачку.
+        niche.setSelectTaskId(null);
+        niche.setStatus(done ? NicheStatus.ACTIVE : NicheStatus.SELECTING);
         niche.setError(null);
         return new ApplyResult(selected, added, removed, skipped);
+    }
+
+    /**
+     * Автодобор, уборка: карточки состава, выбывшие по жизненному циклу
+     * (товар закончился, удалён, стабильно не парсится), убираются из ниши,
+     * их кандидаты — unavailable (строка остаётся, чтобы sku был в exclude поиска).
+     *
+     * @return сколько карточек убрано
+     */
+    @Transactional
+    public int cleanupDroppedMembers(UUID nicheId) {
+        List<UUID> dropped = cardRepository.findDroppedMembers(nicheId);
+        for (UUID cardId : dropped) {
+            cardRepository.removeFromNiche(nicheId, cardId);
+            cardRepository.findById(cardId)
+                    .flatMap(card -> candidateRepository.findByNicheIdAndSku(nicheId, card.getSku()))
+                    .ifPresent(c -> {
+                        c.setStatus("unavailable");
+                        c.setVerifyTaskId(null);
+                        c.setVerifyRequestedAt(null);
+                    });
+        }
+        return dropped.size();
+    }
+
+
+    /**
+     * Автодобор: снять проверки без результата дольше порога (задача потеряна).
+     * Кандидат остаётся candidate и снова участвует в выборе.
+     *
+     * @return сколько проверок снято
+     */
+    @Transactional
+    public int releaseStaleVerifications(UUID nicheId, OffsetDateTime threshold) {
+        int released = 0;
+        for (NicheCandidateEntity c : candidateRepository.findByNicheId(nicheId)) {
+            if (c.getVerifyTaskId() != null
+                    && (c.getVerifyRequestedAt() == null || c.getVerifyRequestedAt().isBefore(threshold))) {
+                c.setVerifyTaskId(null);
+                c.setVerifyRequestedAt(null);
+                released++;
+            }
+        }
+        return released;
+    }
+
+
+    /**
+     * Автодобор, выбор: проход по rankedIds (по убыванию близости), пока есть места.
+     *  - у кандидата активная карточка (обходится, данные свежие) — сразу в нишу;
+     *  - выбывшая карточка страты — unavailable;
+     *  - новый кандидат последнего поиска (создан не раньше freshSince) — сразу в нишу;
+     *  - исторический — место резервируется, verify_task_id; парсинг отправит вызывающий код.
+     */
+    @Transactional
+    public RefillResult applyRefill(UUID nicheId, List<UUID> rankedIds, int slots,
+                                    OffsetDateTime freshSince) {
+        NicheEntity niche = nicheRepository.findById(nicheId).orElse(null);
+        if (niche == null || !NicheStatus.ACTIVE.equals(niche.getStatus())) {
+            return new RefillResult(0, 0, List.of());
+        }
+
+        Map<UUID, NicheCandidateEntity> byId = candidatesById(nicheId);
+        int taken = 0, unavailable = 0;
+        List<VerifyTask> toVerify = new ArrayList<>();
+
+        for (UUID id : rankedIds) {
+            if (slots <= 0) {
+                break;
+            }
+            NicheCandidateEntity c = byId.get(id);
+            if (c == null || !"candidate".equals(c.getStatus()) || c.getVerifyTaskId() != null) {
+                continue;
+            }
+
+            CardEntity card = c.getCard();
+
+            // Карточка обходится — данные свежие, проверка не нужна
+            if (card != null && "active".equals(card.getStatus())) {
+                cardRepository.addToNiche(nicheId, card.getId());
+                c.setStatus("selected");
+                taken++;
+                slots--;
+                continue;
+            }
+
+            // Карточка страты выбыла — товара нет
+            if (card != null && "stratum".equals(c.getSource())) {
+                c.setStatus("unavailable");
+                unavailable++;
+                continue;
+            }
+
+            // Новый кандидат последнего поиска — данные только что спарсены
+            boolean fresh = card == null && freshSince != null && c.getCreatedAt() != null
+                    && !c.getCreatedAt().isBefore(freshSince);
+            if (fresh) {
+                CardEntity attached = attachOrCreate(niche, c);
+                if (attached != null) {
+                    c.setCard(attached);
+                    c.setStatus("selected");
+                    taken++;
+                    slots--;
+                }
+                continue;
+            }
+
+            // Исторический — проверочный парсинг, место резервируется
+            UUID taskId = UUID.randomUUID();
+            c.setVerifyTaskId(taskId);
+            c.setVerifyRequestedAt(OffsetDateTime.now());
+            toVerify.add(new VerifyTask(c.getId(), taskId, c.getSku()));
+            slots--;
+        }
+        return new RefillResult(taken, unavailable, toVerify);
+    }
+
+    private Map<UUID, NicheCandidateEntity> candidatesById(UUID nicheId) {
+        Map<UUID, NicheCandidateEntity> byId = new HashMap<>();
+        for (NicheCandidateEntity c : candidateRepository.findByNicheId(nicheId)) {
+            byId.put(c.getId(), c);
+        }
+        return byId;
     }
 
     /**
      * Карточка для отобранного кандидата: существующая (включить в нишу)
      * или новая карточка, созданная для ниши, с первым замером.
      *
-     * @return null — взять нельзя: карточка выбыла из обхода (кандидат остаётся
-     *         для автодобора) или у кандидата из выдачи нет данных (unavailable)
+     * @return null — взять нельзя: карточка выбыла из обхода или у кандидата
+     *         из выдачи нет данных (unavailable)
      */
     private CardEntity attachOrCreate(NicheEntity niche, NicheCandidateEntity c) {
         // Кандидат из страты или ранее созданная карточка
@@ -186,7 +311,7 @@ public class NicheRankingStore {
 
     private CardEntity attachExisting(NicheEntity niche, CardEntity card) {
         if (!"active".equals(card.getStatus())) {
-            return null;  // выбыла из обхода — вернуть её решит автодобор
+            return null;  // выбыла из обхода
         }
         cardRepository.addToNiche(niche.getId(), card.getId());
         return card;

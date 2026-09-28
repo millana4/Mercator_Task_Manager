@@ -16,7 +16,9 @@ import org.springframework.stereotype.Service;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -86,9 +88,10 @@ public class SetFillRedisService {
             task.setBaseShare(stratum.getBaseShare() != null
                     ? stratum.getBaseShare().doubleValue() : null);
 
-            // exclude = уже собранные карточки страты. При первом наполнении их нет
-            // (пустой список), при доборе — парсер не повторит собранное.
-            task.setExclude(buildExclude(stratum.getId()));
+            // exclude = уже собранные карточки сета и карточки ниш маркетплейса.
+            // При первом наполнении карточек сета нет, при доборе — парсер
+            // не повторит собранное.
+            task.setExclude(buildExclude(stratum.getId(), set.getMarketplace().getId()));
 
             taskProducer.send(task);
             sent++;
@@ -133,7 +136,7 @@ public class SetFillRedisService {
                 task.setIsSeasonal(stratum.getIsSeasonal());
                 task.setBaseShare(stratum.getBaseShare() != null
                         ? stratum.getBaseShare().doubleValue() : null);
-                task.setExclude(buildExclude(stratum.getId()));
+                task.setExclude(buildExclude(stratum.getId(), set.getMarketplace().getId()));
 
                 taskProducer.send(task);
                 sent++;
@@ -151,15 +154,20 @@ public class SetFillRedisService {
         return sent;
     }
 
-    // Собрать exclude для страты. Инвариант: sku уникален в пределах СЕТА,
-    // поэтому исключаем карточки всех страт сета (не только текущей), чтобы
-    // парсер не подобрал sku, уже занятый в соседней страте.
-    private List<ExcludedCard> buildExclude(UUID stratumId) {
+    // Собрать exclude для страты.
+    // 1. Инвариант: sku уникален в пределах СЕТА, поэтому исключаем карточки всех
+    //    страт сета (не только текущей), чтобы парсер не подобрал sku, уже занятый
+    //    в соседней страте.
+    // 2. Активные карточки, созданные для ниш на этом маркетплейсе, — только sku
+    //    (без продавца, чтобы не блокировать другие товары тех же магазинов),
+    //    чтобы категория не завела вторую карточку на тот же товар.
+    private List<ExcludedCard> buildExclude(UUID stratumId, Short marketplaceId) {
         StratumEntity stratum = stratumRepository.findById(stratumId)
                 .orElseThrow(() -> new IllegalArgumentException("Страта не найдена: " + stratumId));
         UUID setId = stratum.getSubcategory().getSet().getId();
 
         List<ExcludedCard> exclude = new ArrayList<>();
+        Set<String> skus = new HashSet<>();
         for (StratumEntity s : stratumRepository.findBySubcategorySetId(setId)) {
             for (CardEntity c : cardRepository.findByStratumId(s.getId())) {
                 ExcludedCard ex = new ExcludedCard();
@@ -168,6 +176,15 @@ public class SetFillRedisService {
                 ex.setUrl(c.getUrl());
                 ex.setSeller(c.getSellerId());
                 ex.setCollection(null);
+                exclude.add(ex);
+                skus.add(c.getSku());
+            }
+        }
+
+        for (String sku : cardRepository.findActiveNicheOwnedSkus(marketplaceId)) {
+            if (skus.add(sku)) {
+                ExcludedCard ex = new ExcludedCard();
+                ex.setSku(sku);
                 exclude.add(ex);
             }
         }

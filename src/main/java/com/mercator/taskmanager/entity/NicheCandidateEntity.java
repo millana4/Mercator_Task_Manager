@@ -76,6 +76,10 @@ public class NicheCandidateEntity {
     @Column(name = "verify_task_id")
     private UUID verifyTaskId;
 
+    // время отправки проверочного парсинга
+    @Column(name = "verify_requested_at")
+    private OffsetDateTime verifyRequestedAt;
+
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
     private OffsetDateTime createdAt;

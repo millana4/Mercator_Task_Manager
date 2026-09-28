@@ -5,6 +5,7 @@ import com.mercator.taskmanager.clickhouse.MeasurementRepository;
 import com.mercator.taskmanager.repository.CardRepository;
 import com.mercator.taskmanager.service.CardLifecycleService;
 import com.mercator.taskmanager.service.NicheReferenceService;
+import com.mercator.taskmanager.service.NicheVerificationService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -21,10 +22,11 @@ import java.time.temporal.ChronoUnit;
  * проставляет last_measured_at (для потокового обхода).
  * На неудачу: помечает карточку через жизненный цикл.
  *
- * Результат парсинга референса ниши (task_id принадлежит нише) уходит
- * в NicheReferenceService — замер по нему не пишется. Результат без card_id,
- * не принадлежащий нише (запоздавший ответ на заменённую задачу референса),
- * пропускается.
+ * Нишевые ветки (по task_id), замер обычным путём не пишется:
+ *  - парсинг референса ниши — NicheReferenceService;
+ *  - проверочный парсинг кандидата ниши — NicheVerificationService.
+ * Результат без card_id, не принадлежащий нишам (запоздавший ответ на
+ * заменённую задачу), пропускается.
  *
  * Транспорт (BRPOP из Redis) — в RedisResultListener; здесь только логика.
  */
@@ -37,6 +39,7 @@ public class ParseResultConsumer {
     private final CardLifecycleService lifecycle;
     private final CardRepository cardRepository;
     private final NicheReferenceService nicheReferenceService;
+    private final NicheVerificationService nicheVerificationService;
     private final JsonMapper mapper = JsonMapper.builder()
             .propertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE)
             .build();
@@ -44,11 +47,13 @@ public class ParseResultConsumer {
     public ParseResultConsumer(MeasurementRepository measurementRepository,
                                CardLifecycleService lifecycle,
                                CardRepository cardRepository,
-                               NicheReferenceService nicheReferenceService) {
+                               NicheReferenceService nicheReferenceService,
+                               NicheVerificationService nicheVerificationService) {
         this.measurementRepository = measurementRepository;
         this.lifecycle = lifecycle;
         this.cardRepository = cardRepository;
         this.nicheReferenceService = nicheReferenceService;
+        this.nicheVerificationService = nicheVerificationService;
     }
 
     /** Обработать одно сообщение результата обхода (JSON). */
@@ -68,8 +73,14 @@ public class ParseResultConsumer {
             return;
         }
 
+        // Результат проверочного парсинга кандидата ниши (автодобор).
+        if (nicheVerificationService.isVerifyTask(result.getTaskId())) {
+            nicheVerificationService.handleResult(result);
+            return;
+        }
+
         // Без card_id привязать замер не к чему: запоздавший ответ на задачу
-        // референса, которую уже заменили повторной отправкой.
+        // ниши, которую уже заменили или сняли.
         if (result.getCardId() == null) {
             log.warn("Результат обхода без card_id пропущен: task_id={}, sku={} (parser_id={})",
                     result.getTaskId(), result.getSku(), result.getParserId());

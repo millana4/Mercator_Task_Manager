@@ -20,6 +20,7 @@ import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.PropertyNamingStrategies;
 import tools.jackson.databind.json.JsonMapper;
 
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -28,20 +29,24 @@ import java.util.Set;
 import java.util.UUID;
 
 /**
- * Подбор кандидатов ниши пачками.
+ * Подбор кандидатов ниши: первичный (пачками) и поиск для автодобора.
  *
- * Отправка: задача подбора на select-batch-size карточек по запросу нейросети,
- * категория ниши (логика подбора), без сезонного фильтра. exclude — sku всех
- * известных кандидатов ниши и карточек страт-подсказок; только sku: без продавца
- * (иначе заблокируются другие товары тех же магазинов) и без названия (иначе
- * отсекутся чужие товары с таким же типовым названием). Следующая пачка
- * отправляется только после ответа на предыдущую.
+ * Отправка: задача подбора по запросу нейросети, категория ниши (логика подбора),
+ * без сезонного фильтра. exclude — sku всех известных кандидатов ниши и карточек
+ * страт-подсказок; только sku: без продавца (иначе заблокируются другие товары
+ * тех же магазинов) и без названия (иначе отсекутся чужие товары с таким же
+ * типовым названием).
  *
- * Результат: новые карточки выдачи — кандидаты search, новые активные карточки
- * страт-подсказок — кандидаты stratum (карточка может входить в несколько ниш).
- * Есть новые — ниша переходит в ranking (ранжирование решит, продолжать ли).
- * Новых нет — выдача исчерпана: ниша active, если в ней есть карточки,
- * ranking — если кандидаты есть, но ещё не ранжированы, failed — если кандидатов нет.
+ * Первичный подбор (ниша selecting): пачка select-batch-size, следующая —
+ * только после ответа на предыдущую. Новые кандидаты — search. Есть новые —
+ * ниша переходит в ranking. Новых нет — выдача исчерпана: active, если в нише
+ * есть карточки, ranking — если кандидаты есть, но не ранжированы, иначе failed.
+ *
+ * Автодобор (ниша active): задача на дефицит × candidate-multiplier. Новые
+ * кандидаты — refill_search; ниша остаётся active, выбор делает NicheRefillService.
+ *
+ * Новые активные карточки страт-подсказок в обоих случаях — кандидаты stratum
+ * (карточка может входить в несколько ниш).
  */
 @Service
 public class NicheSelectionService {
@@ -74,10 +79,161 @@ public class NicheSelectionService {
         this.selectRetryDelayMinutes = selectRetryDelayMinutes;
     }
 
-    /** Отправить задачу подбора очередной пачки; task_id сохраняется в niche.select_task_id. */
+    /** Первичный подбор: отправить очередную пачку. */
     @Transactional
     public void sendSelectTask(NicheEntity niche) {
-        // exclude: все известные кандидаты ниши + карточки страт-подсказок (только sku)
+        UUID taskId = send(niche, batchSize);
+        niche.setSelectTaskId(taskId);
+        niche.setError(null);
+        nicheRepository.save(niche);
+        log.info("Ниша id={}: отправлена пачка подбора «{}», count={}, task_id={}",
+                niche.getId(), niche.getSearchQuery(), batchSize, taskId);
+    }
+
+    /** Автодобор: отправить поиск новых кандидатов на count карточек. */
+    @Transactional
+    public void sendRefillTask(NicheEntity niche, int count) {
+        UUID taskId = send(niche, count);
+        niche.setSelectTaskId(taskId);
+        niche.setRefillRequestedAt(OffsetDateTime.now());
+        nicheRepository.save(niche);
+        log.info("Ниша id={}: автодобор — отправлен поиск кандидатов «{}», count={}, task_id={}",
+                niche.getId(), niche.getSearchQuery(), count, taskId);
+    }
+
+    /** Принадлежит ли результат подбора задаче какой-либо ниши. */
+    public boolean isSelectTask(UUID taskId) {
+        return taskId != null && nicheRepository.existsBySelectTaskId(taskId);
+    }
+
+    @Transactional
+    public void handleResult(SelectResultMessage result) {
+        NicheEntity niche = nicheRepository.findBySelectTaskId(result.getTaskId()).orElse(null);
+        if (niche == null) {
+            return;
+        }
+        if (NicheStatus.SELECTING.equals(niche.getStatus())) {
+            handleBatchResult(niche, result);
+        } else if (NicheStatus.ACTIVE.equals(niche.getStatus())) {
+            handleRefillResult(niche, result);
+        } else {
+            log.info("Ниша id={}: результат подбора пропущен, статус {}",
+                    niche.getId(), niche.getStatus());
+        }
+    }
+
+    // ---------- Первичный подбор: результат пачки ----------
+    private void handleBatchResult(NicheEntity niche, SelectResultMessage result) {
+        // Подбор не удался — повтор через паузу
+        if (Boolean.FALSE.equals(result.getOk())) {
+            niche.setSelectTaskId(null);
+            niche.setError("Подбор не удался: " + result.getError());
+            log.warn("Ниша id={}: пачка подбора не удалась (parser_id={}), повтор через {} мин: {}",
+                    niche.getId(), result.getParserId(), selectRetryDelayMinutes, result.getError());
+            return;
+        }
+
+        boolean hadCandidates = !candidateRepository.findByNicheId(niche.getId()).isEmpty();
+        int[] added = saveNewCandidates(niche, result, "search");
+        int fromSearch = added[0];
+        int fromStrata = added[1];
+
+        // Новые есть — ранжирование
+        if (fromSearch + fromStrata > 0) {
+            niche.setStatus(NicheStatus.RANKING);
+            niche.setError(null);
+            log.info("Ниша id={}: пачка принесла {} новых кандидатов (из выдачи {}, найдено парсером {}; "
+                            + "из страт {}), переход к ранжированию",
+                    niche.getId(), fromSearch + fromStrata, fromSearch, result.getFoundCount(), fromStrata);
+            return;
+        }
+
+        // Новых нет — выдача исчерпана
+        long active = cardRepository.countActiveInNiche(niche.getId());
+        if (active > 0) {
+            niche.setStatus(NicheStatus.ACTIVE);
+            niche.setSelectTaskId(null);  // поиск не идёт — автодобор сможет стартовать
+            log.info("Ниша id={}: выдача исчерпана, подбор завершён, карточек в нише {}",
+                    niche.getId(), active);
+        } else if (hadCandidates) {
+            niche.setStatus(NicheStatus.RANKING);
+            log.info("Ниша id={}: выдача исчерпана, кандидаты есть, но ещё не ранжированы",
+                    niche.getId());
+        } else {
+            niche.setStatus(NicheStatus.FAILED);
+            niche.setError("Не найдено ни одного кандидата по запросу «" + niche.getSearchQuery() + "»");
+            log.warn("Ниша id={}: кандидатов нет — ниша failed", niche.getId());
+        }
+    }
+
+    // ---------- Автодобор: результат поиска ----------
+    private void handleRefillResult(NicheEntity niche, SelectResultMessage result) {
+        niche.setSelectTaskId(null);
+
+        if (Boolean.FALSE.equals(result.getOk())) {
+            log.warn("Ниша id={}: поиск кандидатов автодобора не удался (parser_id={}), "
+                            + "следующий — после интервала: {}",
+                    niche.getId(), result.getParserId(), result.getError());
+            return;
+        }
+
+        int[] added = saveNewCandidates(niche, result, "refill_search");
+        log.info("Ниша id={}: автодобор — новых кандидатов {} (из выдачи {}, найдено парсером {}; "
+                        + "из страт {})",
+                niche.getId(), added[0] + added[1], added[0], result.getFoundCount(), added[1]);
+    }
+
+    /**
+     * Сохранить новых кандидатов: карточки выдачи с данным source и новые
+     * активные карточки страт-подсказок (stratum). Дубли по sku отбрасываются.
+     *
+     * @return {из выдачи, из страт}
+     */
+    private int[] saveNewCandidates(NicheEntity niche, SelectResultMessage result, String source) {
+        Set<String> known = new LinkedHashSet<>();
+        for (NicheCandidateEntity c : candidateRepository.findByNicheId(niche.getId())) {
+            known.add(c.getSku());
+        }
+
+        int fromSearch = 0;
+        if (result.getCards() != null) {
+            for (OzonCard card : result.getCards()) {
+                if (card.getSku() == null || !known.add(card.getSku())) {
+                    continue;
+                }
+                @SuppressWarnings("unchecked")
+                Map<String, Object> snapshot = mapper.convertValue(card, Map.class);
+                snapshot.put("parser_id", result.getParserId());  // метка парсера для первого замера
+                NicheCandidateEntity c = new NicheCandidateEntity();
+                c.setNiche(niche);
+                c.setSku(card.getSku());
+                c.setSource(source);
+                c.setSnapshot(snapshot);
+                c.setStatus("candidate");
+                candidateRepository.save(c);
+                fromSearch++;
+            }
+        }
+
+        int fromStrata = 0;
+        for (CardEntity card : hintedActiveCards(niche.getId())) {
+            if (!known.add(card.getSku())) {
+                continue;
+            }
+            NicheCandidateEntity c = new NicheCandidateEntity();
+            c.setNiche(niche);
+            c.setSku(card.getSku());
+            c.setSource("stratum");
+            c.setCard(card);
+            c.setStatus("candidate");
+            candidateRepository.save(c);
+            fromStrata++;
+        }
+        return new int[]{fromSearch, fromStrata};
+    }
+
+    /** Сформировать и отправить задачу подбора; возвращает task_id. */
+    private UUID send(NicheEntity niche, int count) {
         Set<String> excludeSkus = new LinkedHashSet<>();
         for (NicheCandidateEntity c : candidateRepository.findByNicheId(niche.getId())) {
             excludeSkus.add(c.getSku());
@@ -101,115 +257,15 @@ public class NicheSelectionService {
         task.setMarketplace(niche.getMarketplace().getTitle());
         task.setCategory(niche.getCategory().getTitle());
         task.setQuery(niche.getSearchQuery());
-        task.setCount(batchSize);
+        task.setCount(count);
         task.setIsSeasonal(false);
         task.setBaseShare(null);
         task.setExclude(exclude);
 
-        niche.setSelectTaskId(taskId);
-        niche.setError(null);
-        nicheRepository.save(niche);
-
         selectTaskProducer.send(task);
-        log.info("Ниша id={}: отправлена пачка подбора «{}», count={}, exclude={}, task_id={}",
-                niche.getId(), niche.getSearchQuery(), batchSize, exclude.size(), taskId);
-    }
-
-    /** Принадлежит ли результат подбора задаче какой-либо ниши. */
-    public boolean isSelectTask(UUID taskId) {
-        return taskId != null && nicheRepository.existsBySelectTaskId(taskId);
-    }
-
-    @Transactional
-    public void handleResult(SelectResultMessage result) {
-        NicheEntity niche = nicheRepository.findBySelectTaskId(result.getTaskId()).orElse(null);
-        if (niche == null) {
-            return;
-        }
-        if (!NicheStatus.SELECTING.equals(niche.getStatus())) {
-            log.info("Ниша id={}: результат подбора пропущен, статус {}",
-                    niche.getId(), niche.getStatus());
-            return;
-        }
-
-        // ---------- 1. Подбор не удался — повтор через паузу ----------
-        if (Boolean.FALSE.equals(result.getOk())) {
-            niche.setSelectTaskId(null);
-            niche.setError("Подбор не удался: " + result.getError());
-            log.warn("Ниша id={}: пачка подбора не удалась (parser_id={}), повтор через {} мин: {}",
-                    niche.getId(), result.getParserId(), selectRetryDelayMinutes, result.getError());
-            return;
-        }
-
-        List<NicheCandidateEntity> existing = candidateRepository.findByNicheId(niche.getId());
-        Set<String> known = new LinkedHashSet<>();
-        for (NicheCandidateEntity c : existing) {
-            known.add(c.getSku());
-        }
-
-        // ---------- 2. Новые кандидаты из выдачи ----------
-        int fromSearch = 0;
-        if (result.getCards() != null) {
-            for (OzonCard card : result.getCards()) {
-                if (card.getSku() == null || !known.add(card.getSku())) {
-                    continue;
-                }
-                @SuppressWarnings("unchecked")
-                Map<String, Object> snapshot = mapper.convertValue(card, Map.class);
-                snapshot.put("parser_id", result.getParserId());  // метка парсера для первого замера
-                NicheCandidateEntity c = new NicheCandidateEntity();
-                c.setNiche(niche);
-                c.setSku(card.getSku());
-                c.setSource("search");
-                c.setSnapshot(snapshot);
-                c.setStatus("candidate");
-                candidateRepository.save(c);
-                fromSearch++;
-            }
-        }
-
-        // ---------- 3. Новые кандидаты из страт-подсказок ----------
-        int fromStrata = 0;
-        for (CardEntity card : hintedActiveCards(niche.getId())) {
-            if (!known.add(card.getSku())) {
-                continue;
-            }
-            NicheCandidateEntity c = new NicheCandidateEntity();
-            c.setNiche(niche);
-            c.setSku(card.getSku());
-            c.setSource("stratum");
-            c.setCard(card);
-            c.setStatus("candidate");
-            candidateRepository.save(c);
-            fromStrata++;
-        }
-
-        // ---------- 4. Новые есть — ранжирование ----------
-        if (fromSearch + fromStrata > 0) {
-            niche.setStatus(NicheStatus.RANKING);
-            niche.setError(null);
-            log.info("Ниша id={}: пачка принесла {} новых кандидатов (из выдачи {}, найдено парсером {}; "
-                            + "из страт {}), всего кандидатов {}, переход к ранжированию",
-                    niche.getId(), fromSearch + fromStrata, fromSearch, result.getFoundCount(),
-                    fromStrata, known.size());
-            return;
-        }
-
-        // ---------- 5. Новых нет — выдача исчерпана ----------
-        long active = cardRepository.countActiveInNiche(niche.getId());
-        if (active > 0) {
-            niche.setStatus(NicheStatus.ACTIVE);
-            log.info("Ниша id={}: выдача исчерпана, подбор завершён, карточек в нише {}",
-                    niche.getId(), active);
-        } else if (!existing.isEmpty()) {
-            niche.setStatus(NicheStatus.RANKING);
-            log.info("Ниша id={}: выдача исчерпана, кандидаты есть, но ещё не ранжированы",
-                    niche.getId());
-        } else {
-            niche.setStatus(NicheStatus.FAILED);
-            niche.setError("Не найдено ни одного кандидата по запросу «" + niche.getSearchQuery() + "»");
-            log.warn("Ниша id={}: кандидатов нет — ниша failed", niche.getId());
-        }
+        log.info("Ниша id={}: задача подбора task_id={}, exclude={}",
+                niche.getId(), taskId, exclude.size());
+        return taskId;
     }
 
     /** Активные карточки страт-подсказок ниши. */

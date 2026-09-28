@@ -47,6 +47,7 @@ public class NicheScheduler {
     private final NicheLlmLogRepository llmLogRepository;
     private final NicheSelectionService selectionService;
     private final NicheRankingService rankingService;
+    private final NicheRefillService refillService;
     private final long referenceTimeoutMinutes;
     private final int llmMaxAttempts;
     private final long llmRetryDelayMinutes;
@@ -58,7 +59,7 @@ public class NicheScheduler {
                           NicheQueryGenerator queryGenerator,
                           NicheLlmLogRepository llmLogRepository,
                           NicheSelectionService selectionService,
-                          NicheRankingService rankingService,
+                          NicheRankingService rankingService, NicheRefillService refillService,
                           @Value("${taskmanager.monitoring.inflight-timeout-minutes:45}")
                           long referenceTimeoutMinutes,
                           @Value("${taskmanager.niche.llm-max-attempts:3}")
@@ -75,6 +76,7 @@ public class NicheScheduler {
         this.llmLogRepository = llmLogRepository;
         this.selectionService = selectionService;
         this.rankingService = rankingService;
+        this.refillService = refillService;
         this.referenceTimeoutMinutes = referenceTimeoutMinutes;
         this.llmMaxAttempts = llmMaxAttempts;
         this.llmRetryDelayMinutes = llmRetryDelayMinutes;
@@ -90,6 +92,8 @@ public class NicheScheduler {
             generateQueries();
             rankCandidates();
             startSelection();
+            refillService.fillDeficits();
+            refillService.startSearches();
         } catch (Exception e) {
             // Не роняем планировщик из-за одной ошибки — следующий тик повторит.
             log.error("Ошибка планировщика ниш: {}", e.getMessage(), e);

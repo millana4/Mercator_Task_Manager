@@ -97,6 +97,8 @@ taskmanager:
     select-timeout-hours: ${NICHE_SELECT_TIMEOUT_HOURS:3}
     # Пауза после неудачного подбора перед повтором, мин.
     select-retry-delay-minutes: ${NICHE_SELECT_RETRY_DELAY_MINUTES:30}
+    # Поиск новых кандидатов автодобора по нише — не чаще раза в N часов.
+    refill-interval-hours: ${NICHE_REFILL_INTERVAL_HOURS:6}
 yandex:
   ai:
     # Yandex AI Studio, OpenAI-совместимый Chat Completions API

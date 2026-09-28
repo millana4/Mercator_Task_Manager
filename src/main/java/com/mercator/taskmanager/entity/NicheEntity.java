@@ -98,6 +98,10 @@ public class NicheEntity {
     @Column(name = "select_task_id")
     private UUID selectTaskId;
 
+    // время последнего поиска кандидатов автодобора
+    @Column(name = "refill_requested_at")
+    private OffsetDateTime refillRequestedAt;
+
     @ManyToMany(fetch = FetchType.LAZY)
     @JoinTable(
             name = "niche_stratum_hint",

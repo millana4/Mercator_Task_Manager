@@ -154,4 +154,23 @@ public interface CardRepository extends JpaRepository<CardEntity, UUID> {
             WHERE niche_id = :nicheId AND status <> 'dropped'
             """, nativeQuery = true)
     int dropOwnedCards(@Param("nicheId") UUID nicheId, @Param("now") OffsetDateTime now);
+
+    // Карточки состава ниши, выбывшие по жизненному циклу.
+    @Query(value = """
+            SELECT nc.card_id FROM niche_card nc
+            JOIN card c ON c.id = nc.card_id
+            WHERE nc.niche_id = :nicheId AND c.status = 'dropped'
+            """, nativeQuery = true)
+    List<UUID> findDroppedMembers(@Param("nicheId") UUID nicheId);
+
+    // sku активных карточек, созданных для ниш на маркетплейсе (без страты) —
+    // в exclude подбора страт, чтобы категория не завела вторую карточку.
+    @Query(value = """
+            SELECT c.sku FROM card c
+            JOIN niche n ON n.id = c.niche_id
+            WHERE c.stratum_id IS NULL
+              AND c.status = 'active'
+              AND n.marketplace_id = :marketplaceId
+            """, nativeQuery = true)
+    List<String> findActiveNicheOwnedSkus(@Param("marketplaceId") Short marketplaceId);
 }

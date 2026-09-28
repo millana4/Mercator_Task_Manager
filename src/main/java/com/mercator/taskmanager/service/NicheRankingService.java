@@ -21,17 +21,19 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Ранжирование кандидатов ниши после каждой пачки подбора.
+ * Ранжирование кандидатов ниши.
  *
- * 1. Тексты новых кандидатов (без эмбеддинга): из выдачи — из данных карточки,
- *    из страт — из последнего снимка в ClickHouse. Без текста — unavailable.
- * 2. Один запрос к эмбеддеру: референс + новые кандидаты; близость к референсу.
- * 3. Все кандидаты с близостью по убыванию → первые plan-count — выборка ниши.
- * 4. Кандидатов из выдачи ≥ plan-count × candidate-multiplier — ниша active,
- *    иначе selecting (следующая пачка).
+ * score — общий шаг для первичного подбора и автодобора: тексты новых
+ * кандидатов (без эмбеддинга; из выдачи — из данных карточки, из страт —
+ * из снимка в ClickHouse; без текста — unavailable), один запрос к эмбеддеру
+ * (референс + новые), близость к референсу у всех кандидатов.
+ *
+ * rank — первичный подбор после каждой пачки: первые plan-count по близости —
+ * выборка ниши; кандидатов из выдачи ≥ plan-count × candidate-multiplier —
+ * ниша active, иначе selecting (следующая пачка).
  *
  * @throws com.mercator.taskmanager.embedding.EmbedderException — эмбеддер
- *         недоступен; ниша остаётся в ranking, планировщик повторит
+ *         недоступен; планировщик повторит
  */
 @Service
 public class NicheRankingService {
@@ -54,7 +56,13 @@ public class NicheRankingService {
         this.candidateMultiplier = candidateMultiplier;
     }
 
-    public void rank(NicheEntity niche) {
+    /** Кандидаты ниши и близость каждого к референсу (без unavailable). */
+    public record Scored(List<CandidateView> views, Map<UUID, Double> similarity,
+                         int embeddedCount, int unavailableCount) {
+    }
+
+    /** Эмбеддинги новых кандидатов и близость всех кандидатов к референсу. */
+    public Scored score(NicheEntity niche) {
         List<CandidateView> views = store.loadCandidates(niche.getId());
 
         // ---------- 1. Тексты новых кандидатов ----------
@@ -106,14 +114,23 @@ public class NicheRankingService {
         if (!embedded.isEmpty() || !unavailable.isEmpty()) {
             store.saveEmbeddings(embedded, unavailable);
         }
+        return new Scored(views, similarity, embedded.size(), unavailable.size());
+    }
 
-        // ---------- 3. Отбор ----------
-        List<UUID> ranked = similarity.entrySet().stream()
+    /** id кандидатов по убыванию близости. */
+    public static List<UUID> rankedIds(Map<UUID, Double> similarity) {
+        return similarity.entrySet().stream()
                 .sorted(Map.Entry.<UUID, Double>comparingByValue(Comparator.reverseOrder()))
                 .map(Map.Entry::getKey)
                 .toList();
+    }
 
-        long searchCount = views.stream().filter(v -> "search".equals(v.source())).count();
+    /** Первичный подбор: отбор plan-count ближайших после пачки. */
+    public void rank(NicheEntity niche) {
+        Scored scored = score(niche);
+        List<UUID> ranked = rankedIds(scored.similarity());
+
+        long searchCount = scored.views().stream().filter(v -> "search".equals(v.source())).count();
         boolean done = searchCount >= (long) niche.getPlanCount() * candidateMultiplier;
 
         ApplyResult r = store.applySelection(niche.getId(), ranked, done);
@@ -122,13 +139,14 @@ public class NicheRankingService {
             return;
         }
 
+        Map<UUID, Double> similarity = scored.similarity();
         double best = ranked.isEmpty() ? 0 : similarity.get(ranked.get(0));
         double worstSelected = r.selected() == 0 ? 0
                 : similarity.get(ranked.get(Math.min(r.selected(), ranked.size()) - 1));
         log.info("Ниша id={}: ранжировано {} (новых эмбеддингов {}, unavailable {}); в нише {} из {} "
                         + "(добавлено {}, выбыло {}, пропущено {}); близость {}–{}; "
                         + "кандидатов из выдачи {} — {}",
-                niche.getId(), ranked.size(), embedded.size(), unavailable.size(),
+                niche.getId(), ranked.size(), scored.embeddedCount(), scored.unavailableCount(),
                 r.selected(), niche.getPlanCount(), r.added(), r.removed(), r.skipped(),
                 String.format("%.4f", worstSelected), String.format("%.4f", best),
                 searchCount, done ? "подбор завершён (active)" : "следующая пачка");

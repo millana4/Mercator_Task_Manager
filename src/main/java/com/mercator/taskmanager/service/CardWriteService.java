@@ -91,7 +91,7 @@ public class CardWriteService {
     }
 
     // ClickHouse: замер + снимок для уже сохранённой карточки.
-    private void writeMeasurementAndSnapshot(UUID cardId, String geo, OzonCard card, String parserId) {
+    public void writeMeasurementAndSnapshot(UUID cardId, String geo, OzonCard card, String parserId) {
         OffsetDateTime now = OffsetDateTime.now();
 
         // 1. Замер.
