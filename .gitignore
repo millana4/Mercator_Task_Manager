@@ -37,3 +37,4 @@ out/
 .vscode/
 
 .env
+docker/clickhouse-users/default-user.xml
