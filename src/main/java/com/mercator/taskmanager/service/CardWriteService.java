@@ -28,6 +28,10 @@ import org.slf4j.LoggerFactory;
  *
  * saveCard — карточка страты; saveNicheCard — карточка, найденная для ниши
  * (без страты). Проверку дубля sku для ниши делает вызывающий код.
+ *
+ * Новая карточка сразу получает первый замер, поэтому last_measured_at
+ * ставится при создании тем же временем, что parsed_at замера. Иначе обход
+ * (last_measured_at ASC NULLS FIRST) тут же отправил бы её на повторный парсинг.
  */
 @Service
 public class CardWriteService {
@@ -60,25 +64,28 @@ public class CardWriteService {
             return;
         }
 
-        CardEntity entity = newCardEntity(card);
+        OffsetDateTime measuredAt = OffsetDateTime.now();
+        CardEntity entity = newCardEntity(card, measuredAt);
         entity.setStratum(stratum);
         CardEntity savedCard = cardRepository.save(entity);
 
-        writeMeasurementAndSnapshot(savedCard.getId(), geo, card, parserId);
+        writeMeasurementAndSnapshot(savedCard.getId(), geo, card, parserId, measuredAt);
     }
 
     /** Записать карточку, найденную для ниши (без страты). Возвращает созданную карточку. */
     public CardEntity saveNicheCard(NicheEntity niche, String geo, OzonCard card, String parserId) {
-        CardEntity entity = newCardEntity(card);
+        OffsetDateTime measuredAt = OffsetDateTime.now();
+        CardEntity entity = newCardEntity(card, measuredAt);
         entity.setNiche(niche);
         CardEntity savedCard = cardRepository.save(entity);
 
-        writeMeasurementAndSnapshot(savedCard.getId(), geo, card, parserId);
+        writeMeasurementAndSnapshot(savedCard.getId(), geo, card, parserId, measuredAt);
         return savedCard;
     }
 
     // Паспорт карточки (Postgres) без привязки к страте/нише.
-    private CardEntity newCardEntity(OzonCard card) {
+    // measuredAt - время первого замера, который пишется сразу вслед за карточкой.
+    private CardEntity newCardEntity(OzonCard card, OffsetDateTime measuredAt) {
         CardEntity entity = new CardEntity();
         entity.setSku(card.getSku());
         entity.setName(card.getName());
@@ -87,18 +94,24 @@ public class CardWriteService {
         entity.setCollection(resolveCollection(card));
         entity.setStatus("active");
         entity.setFailedAttempts(0);
+        entity.setLastMeasuredAt(measuredAt);
         return entity;
     }
 
-    // ClickHouse: замер + снимок для уже сохранённой карточки.
+    // ClickHouse: замер + снимок для уже сохранённой карточки (время - текущее).
+    // last_measured_at здесь не трогается: для существующих карточек его ставит вызывающий код.
     public void writeMeasurementAndSnapshot(UUID cardId, String geo, OzonCard card, String parserId) {
-        OffsetDateTime now = OffsetDateTime.now();
+        writeMeasurementAndSnapshot(cardId, geo, card, parserId, OffsetDateTime.now());
+    }
 
+    // ClickHouse: замер + снимок с заданным временем замера.
+    private void writeMeasurementAndSnapshot(UUID cardId, String geo, OzonCard card,
+                                             String parserId, OffsetDateTime parsedAt) {
         // 1. Замер.
         Measurement m = Measurement.builder()
                 .cardId(cardId)
                 .sku(card.getSku())
-                .parsedAt(now)
+                .parsedAt(parsedAt)
                 .geo(geo)
                 .cardPrice(card.getPrice() != null ? card.getPrice().getCardPrice() : null)
                 .price(card.getPrice() != null ? card.getPrice().getPrice() : null)
@@ -114,7 +127,7 @@ public class CardWriteService {
         CardSnapshot snap = CardSnapshot.builder()
                 .cardId(cardId)
                 .sku(card.getSku())
-                .parsedAt(now)
+                .parsedAt(parsedAt)
                 .name(card.getName())
                 .description(card.getDescription())
                 .brand(card.getBrand())
