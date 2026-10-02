@@ -59,8 +59,8 @@ public class NicheRankingStore {
     public record Embedded(UUID candidateId, String text, float[] vector, double similarity) {
     }
 
-    /** Итог применения отбора (первичный подбор). */
-    public record ApplyResult(int selected, int added, int removed, int skipped) {
+    /** Итог применения отбора (первичный подбор); done — отобрано plan-count, ниша active. */
+    public record ApplyResult(int selected, int added, int removed, int skipped, boolean done) {
     }
 
     /** Задача проверочного парсинга исторического кандидата. */
@@ -98,15 +98,18 @@ public class NicheRankingStore {
         }
     }
 
+
     /**
      * Первичный подбор: первые plan-count из rankedIds (по убыванию близости) —
      * выборка ниши, остальные ранее отобранные выбывают. Затем статус ниши:
-     * done — active, иначе selecting с очищенной задачей (следующая пачка).
+     * отобрано plan-count — active (подбор завершён), иначе selecting с очищенной
+     * задачей (следующая пачка на недостающее число). Пропущенные кандидаты
+     * (карточка выбыла из обхода, нет данных) в отобранные не входят.
      *
      * @return null — ниша уже не в статусе ranking (например, удалена)
      */
     @Transactional
-    public ApplyResult applySelection(UUID nicheId, List<UUID> rankedIds, boolean done) {
+    public ApplyResult applySelection(UUID nicheId, List<UUID> rankedIds) {
         NicheEntity niche = nicheRepository.findById(nicheId).orElse(null);
         if (niche == null || !NicheStatus.RANKING.equals(niche.getStatus())) {
             return null;
@@ -144,13 +147,16 @@ public class NicheRankingStore {
             }
         }
 
+        boolean done = selected >= planCount;
+
         // Задача пачки обработана. При active — чтобы автодобор видел, что поиск
         // не идёт; при selecting — планировщик отправит следующую пачку.
         niche.setSelectTaskId(null);
         niche.setStatus(done ? NicheStatus.ACTIVE : NicheStatus.SELECTING);
         niche.setError(null);
-        return new ApplyResult(selected, added, removed, skipped);
+        return new ApplyResult(selected, added, removed, skipped, done);
     }
+
 
     /**
      * Автодобор, уборка: карточки состава, выбывшие по жизненному циклу

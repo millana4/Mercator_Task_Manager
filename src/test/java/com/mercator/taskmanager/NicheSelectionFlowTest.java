@@ -12,13 +12,16 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 /**
- * Путь ниши до active: референс → запрос → пачки → ранжирование с вытеснением.
- * Страта-подсказка: #89, #75; plan_count = 3; подбор завершается при 6 кандидатах из выдачи.
+ * Первичный подбор ниши до active: референс → запрос → пачки → ранжирование.
+ * Подбор останавливается, как только отобрано plan-count карточек; каждая
+ * следующая пачка — на недостающее число, не больше select-batch-size (3).
+ * Близость задаёт «#NN» в названии карточки (0.NN).
  */
 class NicheSelectionFlowTest extends NicheTestSupport {
 
+    /** Страта-подсказка #89 #75, plan 3: первая пачка вместе со стратой — 5 кандидатов, сразу active. */
     @Test
-    void referenceQueryBatchesRankingToActive() {
+    void stopsWhenPlanCountSelected() {
         createHintStratum(89, 75);
         NicheRef niche = createNiche(true, 3);
         UUID id = niche.id();
@@ -43,36 +46,70 @@ class NicheSelectionFlowTest extends NicheTestSupport {
 
         UUID batch1 = selectTaskId(id);
         Map<?, ?> task1 = selectTask(batch1);
-        assertThat(task1.get("count")).isEqualTo(3);
+        assertThat(task1.get("count")).isEqualTo(3);  // отобрано 0 из 3
         assertThat(task1.get("is_seasonal")).isEqualTo(false);
         assertThat(excludeSkus(task1)).containsExactlyInAnyOrder(stratumSku(89), stratumSku(75));
 
-        // ---------- 3. Пачка 1: #80 #70 #60 ----------
+        // ---------- 3. Пачка 1: #80 #70 #60 — отобрано 3 из 3, подбор завершён ----------
         selectConsumer.handle(selectResult(batch1, 80, 70, 60));
         assertThat(nicheStatus(id)).isEqualTo("ranking");
 
-        scheduler.tick();  // ранжирование + отправка пачки 2
-        assertThat(members(id)).containsExactlyInAnyOrder(stratumSku(89), searchSku(80), stratumSku(75));
-        assertThat(nicheStatus(id)).isEqualTo("selecting");
-        UUID batch2 = selectTaskId(id);
-        assertThat(batch2).isNotNull().isNotEqualTo(batch1);
-        assertThat(excludeSkus(selectTask(batch2))).hasSize(5);
-
-        // ---------- 4. Пачка 2: #95 #93 #50 — вытеснение и завершение ----------
-        selectConsumer.handle(selectResult(batch2, 95, 93, 50));
         scheduler.tick();
-
-        assertThat(members(id)).containsExactlyInAnyOrder(searchSku(95), searchSku(93), stratumSku(89));
+        assertThat(members(id)).containsExactlyInAnyOrder(stratumSku(89), searchSku(80), stratumSku(75));
         assertThat(nicheStatus(id)).isEqualTo("active");
         assertThat(selectTaskId(id)).isNull();  // автодобор не должен считать поиск идущим
+        assertThat(redis.opsForList().size(SELECT_TASKS)).isEqualTo(1L);  // второй пачки нет
 
-        // вытесненная карточка, созданная для ниши, выбыла; карточка страты осталась в страте
-        assertThat(cardStatus(searchSku(80))).isEqualTo("dropped");
-        assertThat(cardStatus(stratumSku(75))).isEqualTo("active");
-        assertThat(candidateStatus(id, searchSku(80))).isEqualTo("candidate");
-        assertThat(candidateStatus(id, stratumSku(75))).isEqualTo("candidate");
+        // не вошедшие в нишу остаются кандидатами, карточки для них не создаются
+        assertThat(candidateStatus(id, searchSku(70))).isEqualTo("candidate");
+        assertThat(candidateStatus(id, searchSku(60))).isEqualTo("candidate");
+        assertThat(cardStatus(searchSku(70))).isNull();
+        assertThat(cardStatus(searchSku(60))).isNull();
 
-        // первые замеры записаны для созданных карточек: C80, C95, C93
-        verify(measurementRepository, times(3)).insert(any(Measurement.class));
+        // первый замер записан только для созданной карточки C80
+        verify(measurementRepository, times(1)).insert(any(Measurement.class));
+    }
+
+    /** Страта-подсказка #89, plan 5: после первой пачки отобрано 3 — вторая пачка на остаток 2. */
+    @Test
+    void nextBatchRequestsRemainder() {
+        createHintStratum(89);
+        NicheRef niche = createNiche(true, 5);
+        UUID id = niche.id();
+
+        scheduler.tick();
+        parseConsumer.handle(referenceResult(uuid("SELECT reference_task_id FROM niche WHERE id = ?", id)));
+        scheduler.tick();
+        assertThat(nicheStatus(id)).isEqualTo("selecting");
+
+        // ---------- 1. Пачка 1 на 3: пришли #80 #70 — вместе с картой страты отобрано 3 из 5 ----------
+        UUID batch1 = selectTaskId(id);
+        assertThat(selectTask(batch1).get("count")).isEqualTo(3);
+
+        selectConsumer.handle(selectResult(batch1, 80, 70));
+        scheduler.tick();  // ранжирование + отправка пачки 2
+
+        assertThat(members(id)).containsExactlyInAnyOrder(stratumSku(89), searchSku(80), searchSku(70));
+        assertThat(nicheStatus(id)).isEqualTo("selecting");
+
+        // ---------- 2. Пачка 2 — на остаток: min(3, 5 − 3) = 2 ----------
+        UUID batch2 = selectTaskId(id);
+        assertThat(batch2).isNotNull().isNotEqualTo(batch1);
+        Map<?, ?> task2 = selectTask(batch2);
+        assertThat(task2.get("count")).isEqualTo(2);
+        assertThat(excludeSkus(task2)).containsExactlyInAnyOrder(
+                stratumSku(89), searchSku(80), searchSku(70));
+
+        // ---------- 3. Пачка 2: #95 #60 — отобрано 5 из 5, подбор завершён ----------
+        selectConsumer.handle(selectResult(batch2, 95, 60));
+        scheduler.tick();
+
+        assertThat(members(id)).containsExactlyInAnyOrder(
+                searchSku(95), stratumSku(89), searchSku(80), searchSku(70), searchSku(60));
+        assertThat(nicheStatus(id)).isEqualTo("active");
+        assertThat(selectTaskId(id)).isNull();
+
+        // первые замеры для созданных карточек: C80, C70, C95, C60
+        verify(measurementRepository, times(4)).insert(any(Measurement.class));
     }
 }

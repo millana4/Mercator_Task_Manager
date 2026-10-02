@@ -37,8 +37,9 @@ import java.util.UUID;
  * тех же магазинов) и без названия (иначе отсекутся чужие товары с таким же
  * типовым названием).
  *
- * Первичный подбор (ниша selecting): пачка select-batch-size, следующая —
- * только после ответа на предыдущую. Новые кандидаты — search. Есть новые —
+ * Первичный подбор (ниша selecting): пачка на недостающее до plan-count число
+ * карточек, не больше select-batch-size; следующая — только после ответа на
+ * предыдущую. Новые кандидаты — search. Есть новые —
  * ниша переходит в ranking. Новых нет — выдача исчерпана: active, если в нише
  * есть карточки, ranking — если кандидаты есть, но не ранжированы, иначе failed.
  *
@@ -79,16 +80,27 @@ public class NicheSelectionService {
         this.selectRetryDelayMinutes = selectRetryDelayMinutes;
     }
 
-    /** Первичный подбор: отправить очередную пачку. */
+    /**
+     * Первичный подбор: отправить очередную пачку на недостающее до plan-count
+     * число карточек, но не больше select-batch-size.
+     */
     @Transactional
     public void sendSelectTask(NicheEntity niche) {
-        UUID taskId = send(niche, batchSize);
+        long selected = candidateRepository.findByNicheId(niche.getId()).stream()
+                .filter(c -> "selected".equals(c.getStatus()))
+                .count();
+        // В статусе selecting отобрано меньше plan-count (иначе ниша уже active),
+        // поэтому остаток не меньше 1; ограничение снизу — защита от рассинхронизации.
+        int count = (int) Math.max(1, Math.min(batchSize, niche.getPlanCount() - selected));
+
+        UUID taskId = send(niche, count);
         niche.setSelectTaskId(taskId);
         niche.setError(null);
         nicheRepository.save(niche);
-        log.info("Ниша id={}: отправлена пачка подбора «{}», count={}, task_id={}",
-                niche.getId(), niche.getSearchQuery(), batchSize, taskId);
+        log.info("Ниша id={}: отправлена пачка подбора «{}», count={} (отобрано {} из {}), task_id={}",
+                niche.getId(), niche.getSearchQuery(), count, selected, niche.getPlanCount(), taskId);
     }
+
 
     /** Автодобор: отправить поиск новых кандидатов на count карточек. */
     @Transactional

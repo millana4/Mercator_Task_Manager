@@ -10,7 +10,6 @@ import com.mercator.taskmanager.service.NicheRankingStore.CandidateView;
 import com.mercator.taskmanager.service.NicheRankingStore.Embedded;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -29,8 +28,10 @@ import java.util.UUID;
  * (референс + новые), близость к референсу у всех кандидатов.
  *
  * rank — первичный подбор после каждой пачки: первые plan-count по близости —
- * выборка ниши; кандидатов из выдачи ≥ plan-count × candidate-multiplier —
- * ниша active, иначе selecting (следующая пачка).
+ * выборка ниши. Отобрано plan-count — ниша active (подбор завершён), иначе
+ * selecting: следующая пачка на недостающее число карточек (NicheSelectionService).
+ * Решение принимает NicheRankingStore.applySelection — там известно, сколько
+ * кандидатов действительно взято.
  *
  * @throws com.mercator.taskmanager.embedding.EmbedderException — эмбеддер
  *         недоступен; планировщик повторит
@@ -43,17 +44,13 @@ public class NicheRankingService {
     private final NicheRankingStore store;
     private final CardSnapshotRepository snapshotRepository;
     private final EmbedderClient embedder;
-    private final int candidateMultiplier;
 
     public NicheRankingService(NicheRankingStore store,
                                CardSnapshotRepository snapshotRepository,
-                               EmbedderClient embedder,
-                               @Value("${taskmanager.niche.candidate-multiplier:2}")
-                               int candidateMultiplier) {
+                               EmbedderClient embedder) {
         this.store = store;
         this.snapshotRepository = snapshotRepository;
         this.embedder = embedder;
-        this.candidateMultiplier = candidateMultiplier;
     }
 
     /** Кандидаты ниши и близость каждого к референсу (без unavailable). */
@@ -130,10 +127,7 @@ public class NicheRankingService {
         Scored scored = score(niche);
         List<UUID> ranked = rankedIds(scored.similarity());
 
-        long searchCount = scored.views().stream().filter(v -> "search".equals(v.source())).count();
-        boolean done = searchCount >= (long) niche.getPlanCount() * candidateMultiplier;
-
-        ApplyResult r = store.applySelection(niche.getId(), ranked, done);
+        ApplyResult r = store.applySelection(niche.getId(), ranked);
         if (r == null) {
             log.info("Ниша id={}: ранжирование не применено — статус уже изменился", niche.getId());
             return;
@@ -144,11 +138,10 @@ public class NicheRankingService {
         double worstSelected = r.selected() == 0 ? 0
                 : similarity.get(ranked.get(Math.min(r.selected(), ranked.size()) - 1));
         log.info("Ниша id={}: ранжировано {} (новых эмбеддингов {}, unavailable {}); в нише {} из {} "
-                        + "(добавлено {}, выбыло {}, пропущено {}); близость {}–{}; "
-                        + "кандидатов из выдачи {} — {}",
+                        + "(добавлено {}, выбыло {}, пропущено {}); близость {}–{} — {}",
                 niche.getId(), ranked.size(), scored.embeddedCount(), scored.unavailableCount(),
                 r.selected(), niche.getPlanCount(), r.added(), r.removed(), r.skipped(),
                 String.format("%.4f", worstSelected), String.format("%.4f", best),
-                searchCount, done ? "подбор завершён (active)" : "следующая пачка");
+                r.done() ? "подбор завершён (active)" : "следующая пачка");
     }
 }

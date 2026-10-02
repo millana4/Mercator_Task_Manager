@@ -12,28 +12,29 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 /**
- * Автодобор. После bringToActive: в нише C95, C93, S89; кандидаты: C80 (карточка
- * выбыла при вытеснении), S75 (активная карточка страты), C70, C60, C50.
- * Выбывают C95 и C93 → уборка, поиск на 4, ответ #97 #40 →
- * C97 сразу, C80 — на проверку.
+ * Автодобор. После bringToActive (страта #75 #55, plan 3, пачка #80 #70 #60):
+ * в нише C80, S75, C70; кандидаты: C60 (карточки нет), S55 (активная карточка страты).
+ * Выбывают C80 и C70 → уборка, поиск на 4, ответ #97 #40 →
+ * C97 сразу (новый кандидат поиска), C60 — на проверку (исторический кандидат).
  */
 class NicheRefillFlowTest extends NicheTestSupport {
 
-    /** Довести до момента, когда C97 взят, а C80 на проверке. Возвращает id ниши. */
+    /** Довести до момента, когда C97 взят, а C60 на проверке. Возвращает id ниши. */
     private UUID refillUntilVerification() {
-        createHintStratum(89, 75);
+        createHintStratum(75, 55);
         UUID id = createNiche(true, 3).id();
         bringToActive(id);
         assertThat(nicheStatus(id)).isEqualTo("active");
+        assertThat(members(id)).containsExactlyInAnyOrder(searchSku(80), stratumSku(75), searchSku(70));
 
         // ---------- выбытие по жизненному циклу ----------
         exec("UPDATE card SET status = 'dropped', dropped_at = now() WHERE sku IN (?, ?)",
-                searchSku(95), searchSku(93));
+                searchSku(80), searchSku(70));
         scheduler.tick();
 
-        assertThat(members(id)).containsExactly(stratumSku(89));
-        assertThat(candidateStatus(id, searchSku(95))).isEqualTo("unavailable");
-        assertThat(candidateStatus(id, searchSku(93))).isEqualTo("unavailable");
+        assertThat(members(id)).containsExactly(stratumSku(75));
+        assertThat(candidateStatus(id, searchSku(80))).isEqualTo("unavailable");
+        assertThat(candidateStatus(id, searchSku(70))).isEqualTo("unavailable");
 
         // ---------- поиск автодобора ----------
         UUID refillTask = selectTaskId(id);
@@ -42,18 +43,18 @@ class NicheRefillFlowTest extends NicheTestSupport {
         Map<?, ?> task = selectTask(refillTask);
         assertThat(task.get("count")).isEqualTo(4);  // дефицит 2 × множитель 2
         assertThat(excludeSkus(task)).contains(
-                searchSku(80), searchSku(70), searchSku(60), searchSku(50),
-                searchSku(95), searchSku(93), stratumSku(89), stratumSku(75));
+                searchSku(80), searchSku(70), searchSku(60),
+                stratumSku(75), stratumSku(55));
 
         selectConsumer.handle(selectResult(refillTask, 97, 40));
         assertThat(selectTaskId(id)).isNull();
         assertThat(candidateStatus(id, searchSku(97))).isEqualTo("candidate");
 
-        // ---------- выбор: C97 — сразу, C80 — на проверку ----------
+        // ---------- выбор: C97 — сразу, C60 — на проверку ----------
         scheduler.tick();
-        assertThat(members(id)).containsExactlyInAnyOrder(stratumSku(89), searchSku(97));
+        assertThat(members(id)).containsExactlyInAnyOrder(stratumSku(75), searchSku(97));
         assertThat(uuid("SELECT verify_task_id FROM niche_candidate WHERE niche_id = ? AND sku = ?",
-                id, searchSku(80))).isNotNull();
+                id, searchSku(60))).isNotNull();
         assertThat(selectTaskId(id)).isNull();  // дефицит закрыт — нового поиска нет
         return id;
     }
@@ -62,32 +63,31 @@ class NicheRefillFlowTest extends NicheTestSupport {
     void outOfStockCandidateIsReplacedByNextOne() {
         UUID id = refillUntilVerification();
         UUID verifyTask = uuid("SELECT verify_task_id FROM niche_candidate WHERE niche_id = ? AND sku = ?",
-                id, searchSku(80));
+                id, searchSku(60));
 
-        parseConsumer.handle(verifyResult(verifyTask, searchSku(80), false));
-        assertThat(candidateStatus(id, searchSku(80))).isEqualTo("unavailable");
-        assertThat(cardStatus(searchSku(80))).isEqualTo("dropped");
+        parseConsumer.handle(verifyResult(verifyTask, searchSku(60), false));
+        assertThat(candidateStatus(id, searchSku(60))).isEqualTo("unavailable");
+        assertThat(cardStatus(searchSku(60))).isNull();  // карточка не создаётся
 
-        // освободившееся место — следующему: активная карточка страты S75, без проверки
+        // освободившееся место — следующему: активная карточка страты S55, без проверки
         scheduler.tick();
         assertThat(members(id)).containsExactlyInAnyOrder(
-                stratumSku(89), searchSku(97), stratumSku(75));
+                stratumSku(75), searchSku(97), stratumSku(55));
     }
 
     @Test
-    void inStockCandidateReturnsDroppedCard() {
+    void inStockCandidateGetsCreatedCard() {
         UUID id = refillUntilVerification();
         UUID verifyTask = uuid("SELECT verify_task_id FROM niche_candidate WHERE niche_id = ? AND sku = ?",
-                id, searchSku(80));
+                id, searchSku(60));
 
-        parseConsumer.handle(verifyResult(verifyTask, searchSku(80), true));
+        parseConsumer.handle(verifyResult(verifyTask, searchSku(60), true));
 
-        assertThat(cardStatus(searchSku(80))).isEqualTo("active");
-        assertThat(str("SELECT dropped_at::text FROM card WHERE sku = ?", searchSku(80))).isNull();
-        assertThat(candidateStatus(id, searchSku(80))).isEqualTo("selected");
+        assertThat(cardStatus(searchSku(60))).isEqualTo("active");
+        assertThat(candidateStatus(id, searchSku(60))).isEqualTo("selected");
         assertThat(members(id)).containsExactlyInAnyOrder(
-                stratumSku(89), searchSku(97), searchSku(80));
-        // замеры: C80, C95, C93 (первичный подбор) + C97 (автодобор) + C80 (проверка)
-        verify(measurementRepository, times(5)).insert(any(Measurement.class));
+                stratumSku(75), searchSku(97), searchSku(60));
+        // замеры: C80, C70 (первичный подбор) + C97 (автодобор) + C60 (проверка)
+        verify(measurementRepository, times(4)).insert(any(Measurement.class));
     }
 }

@@ -82,10 +82,11 @@ taskmanager:
     # plan-count — сколько держать на парсинге (с запасом на выбывание).
     target-count: ${NICHE_TARGET_COUNT:30}
     plan-count: ${NICHE_PLAN_COUNT:40}
-    # Кандидатов из выдачи набирается plan-count × candidate-multiplier,
-    # из них по близости к референсу в нише остаётся plan-count.
+    # Автодобор: поиск новых кандидатов на дефицит × candidate-multiplier
+    # (запас на отсев по близости и на непрошедшие проверку).
     candidate-multiplier: ${NICHE_CANDIDATE_MULTIPLIER:2}
-    # Размер одной задачи подбора кандидатов (пачки).
+    # Первичный подбор: пачки до plan-count отобранных карточек, затем ниша active.
+    # Пачка — недостающее до plan-count число карточек, но не больше select-batch-size.
     select-batch-size: ${NICHE_SELECT_BATCH_SIZE:10}
     # Как часто планировщик ниш продвигает ниши по статусам, мс.
     scheduler-interval-ms: ${NICHE_SCHEDULER_INTERVAL_MS:30000}

@@ -172,15 +172,17 @@ abstract class NicheTestSupport extends PostgresTestBase {
         return new NicheRef(id, ext);
     }
 
-    /** Провести нишу до active: референс, запрос, пачки #80 #70 #60 и #95 #93 #50. */
+    /**
+     * Провести нишу до active одной пачкой: референс, запрос, пачка #80 #70 #60, ранжирование.
+     * Подбор завершается, когда отобрано plan-count, поэтому plan-count не должен превышать
+     * число кандидатов пачки и страт-подсказок.
+     */
     protected void bringToActive(UUID nicheId) {
         scheduler.tick();
         parseConsumer.handle(referenceResult(uuid(
                 "SELECT reference_task_id FROM niche WHERE id = ?", nicheId)));
         scheduler.tick();
         selectConsumer.handle(selectResult(selectTaskId(nicheId), 80, 70, 60));
-        scheduler.tick();
-        selectConsumer.handle(selectResult(selectTaskId(nicheId), 95, 93, 50));
         scheduler.tick();
     }
 
