@@ -18,6 +18,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.OffsetDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
 
@@ -56,6 +57,8 @@ public class MonitoringScheduler {
     private final int queueBuffer;
     private final long inflightTimeoutMinutes;
     private final String geo;
+    private final List<String> slowCategories;   // [""] - медленных категорий нет
+    private final long slowMinIntervalHours;
 
     public MonitoringScheduler(CardRepository cardRepository,
                                MarketplaceRepository marketplaceRepository,
@@ -64,7 +67,15 @@ public class MonitoringScheduler {
                                RedisKeys keys,
                                @Value("${taskmanager.monitoring.queue-buffer}") int queueBuffer,
                                @Value("${taskmanager.monitoring.inflight-timeout-minutes}") long inflightTimeoutMinutes,
-                               @Value("${taskmanager.geo}") String geo) {
+                               @Value("${taskmanager.geo}") String geo,
+                               @Value("${taskmanager.monitoring.slow-categories:}") String slowCategories,
+                               @Value("${taskmanager.monitoring.slow-min-interval-hours:24}") long slowMinIntervalHours) {
+        List<String> slow = Arrays.stream(slowCategories.split(","))
+                .map(String::trim).filter(s -> !s.isEmpty()).toList();
+        this.slowCategories = slow.isEmpty() ? List.of("") : slow;
+        this.slowMinIntervalHours = slowMinIntervalHours;
+        log.info("Обход: медленные категории {} - не чаще раза в {} ч",
+                slow.isEmpty() ? "нет" : slow, slowMinIntervalHours);
         this.cardRepository = cardRepository;
         this.marketplaceRepository = marketplaceRepository;
         this.parseTaskProducer = parseTaskProducer;
@@ -107,8 +118,9 @@ public class MonitoringScheduler {
         OffsetDateTime now = OffsetDateTime.now().truncatedTo(ChronoUnit.SECONDS);
         OffsetDateTime threshold = now.minusMinutes(inflightTimeoutMinutes);
 
-        List<CardEntity> candidates = cardRepository
-                .findQueueCandidatesByMarketplace(marketplace.getId(), threshold, need);
+        List<CardEntity> candidates = cardRepository.findQueueCandidatesByMarketplace(
+                marketplace.getId(), threshold,
+                slowCategories, now.minusHours(slowMinIntervalHours), need);
         if (candidates.isEmpty()) {
             return;  // нет активных, кого пора обойти
         }

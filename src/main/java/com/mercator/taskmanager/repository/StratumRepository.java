@@ -34,4 +34,15 @@ public interface StratumRepository extends JpaRepository<StratumEntity, UUID> {
     List<StratumEntity> findForNicheHints(@Param("marketplaceId") Short marketplaceId,
                                           @Param("categoryId") Short categoryId,
                                           @Param("geoId") Short geoId);
+
+    // Страты всех сетов категории вместе с подкатегорией и сетом (маркетплейс, гео)
+    // - для задач снимка выдачи без открытой транзакции.
+    @Query("""
+            SELECT st FROM StratumEntity st
+            JOIN FETCH st.subcategory sc
+            JOIN FETCH sc.set s
+            WHERE s.category.title = :category
+            ORDER BY sc.title, st.item
+            """)
+    List<StratumEntity> findByCategoryTitleWithSet(@Param("category") String category);
 }

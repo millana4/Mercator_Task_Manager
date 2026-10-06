@@ -71,12 +71,23 @@ taskmanager:
     # Окно ожидания результата, мин. Если по отправленной карточке результат
     # не пришёл за это время — она снова становится кандидатом (переотправка).
     inflight-timeout-minutes: ${MONITORING_INFLIGHT_TIMEOUT_MINUTES:45}
+    # Медленные категории (через запятую): карточка попадает в обход не чаще раза
+    # в slow-min-interval-hours часов - данные собираются, но реже. Пусто - все как можно чаще.
+    slow-categories: ${MONITORING_SLOW_CATEGORIES:clothing}
+    slow-min-interval-hours: ${MONITORING_SLOW_MIN_INTERVAL_HOURS:24}
   redis:
     # Префиксы ключей списков задач/результатов (гео добавляется в коде).
     parse-tasks-prefix: ${REDIS_PARSE_TASKS_PREFIX:parse:tasks}
     parse-results-prefix: ${REDIS_PARSE_RESULTS_PREFIX:parse:results}
     select-tasks-prefix: ${REDIS_SELECT_TASKS_PREFIX:select:tasks}
     select-results-prefix: ${REDIS_SELECT_RESULTS_PREFIX:select:results}
+    search-tasks-prefix: ${REDIS_SEARCH_TASKS_PREFIX:search:tasks}
+    search-results-prefix: ${REDIS_SEARCH_RESULTS_PREFIX:search:results}
+  search-snapshot:
+    # Снимки поисковой выдачи по стратам. Время - МСК, формат:
+    # категория=ЧЧ:ММ[,ЧЧ:ММ];категория=ЧЧ:ММ
+    enabled: ${SEARCH_SNAPSHOT_ENABLED:true}
+    schedule: ${SEARCH_SNAPSHOT_SCHEDULE:kids_clothing=06:37,18:37;clothing=18:37}
   niche:
     # Размер ниши: target-count — сколько карточек нужно для анализа,
     # plan-count — сколько держать на парсинге (с запасом на выбывание).

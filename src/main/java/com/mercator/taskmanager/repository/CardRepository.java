@@ -64,26 +64,33 @@ public interface CardRepository extends JpaRepository<CardEntity, UUID> {
     // Кандидаты для обхода в пределах одного маркетплейса: активные, которых
     // дольше всех не мерили, исключая уже отправленные (last_enqueued_at
     // свежее порога).
-    // Маркетплейс карточки: из сета через card → stratum → subcategory → set,
+    // Маркетплейс и категория карточки: из сета через card → stratum → subcategory → set,
     // а у карточки без страты — из ниши-создателя. LEFT JOIN, чтобы карточки
     // без страты тоже попадали в обход.
+    // Медленные категории (:slowCategories): карточка - кандидат, только если с
+    // последнего замера прошло больше :slowThreshold. Пустого списка не бывает:
+    // при пустой настройке передаётся [""] (категории без названия нет).
     @Query(value = """
             SELECT c.* FROM card c
             LEFT JOIN stratum st ON st.id = c.stratum_id
             LEFT JOIN subcategory sc ON sc.id = st.subcategory_id
             LEFT JOIN "set" s ON s.id = sc.set_id
             LEFT JOIN niche n ON n.id = c.niche_id
+            LEFT JOIN category cat ON cat.id = COALESCE(s.category_id, n.category_id)
             WHERE c.status = 'active'
               AND COALESCE(s.marketplace_id, n.marketplace_id) = :marketplaceId
               AND (c.last_enqueued_at IS NULL OR c.last_enqueued_at < :threshold)
+              AND (cat.title IS NULL OR cat.title NOT IN (:slowCategories)
+                   OR c.last_measured_at IS NULL OR c.last_measured_at < :slowThreshold)
             ORDER BY c.last_measured_at ASC NULLS FIRST
             LIMIT :limit
             """, nativeQuery = true)
     List<CardEntity> findQueueCandidatesByMarketplace(
             @Param("marketplaceId") Short marketplaceId,
             @Param("threshold") OffsetDateTime threshold,
+            @Param("slowCategories") List<String> slowCategories,
+            @Param("slowThreshold") OffsetDateTime slowThreshold,
             @Param("limit") int limit);
-
     // Карточка с таким sku на маркетплейсе (в любой страте или нише), активная — первой.
     // Для кандидатов ниши из выдачи: не заводить дубль уже существующей карточки.
     @Query(value = """

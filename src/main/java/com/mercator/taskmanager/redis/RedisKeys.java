@@ -19,12 +19,18 @@ public class RedisKeys {
     private final String parseResultsPrefix;
     private final String selectTasksPrefix;
     private final String selectResultsPrefix;
+    private final String searchTasksPrefix;
+    private final String searchResultsPrefix;
 
     public RedisKeys(
             @Value("${taskmanager.redis.parse-tasks-prefix}") String parseTasksPrefix,
             @Value("${taskmanager.redis.parse-results-prefix}") String parseResultsPrefix,
             @Value("${taskmanager.redis.select-tasks-prefix}") String selectTasksPrefix,
-            @Value("${taskmanager.redis.select-results-prefix}") String selectResultsPrefix) {
+            @Value("${taskmanager.redis.select-results-prefix}") String selectResultsPrefix,
+            @Value("${taskmanager.redis.search-tasks-prefix:search:tasks}") String searchTasksPrefix,
+            @Value("${taskmanager.redis.search-results-prefix:search:results}") String searchResultsPrefix) {
+        this.searchTasksPrefix = searchTasksPrefix;
+        this.searchResultsPrefix = searchResultsPrefix;
         this.parseTasksPrefix = parseTasksPrefix;
         this.parseResultsPrefix = parseResultsPrefix;
         this.selectTasksPrefix = selectTasksPrefix;
@@ -49,5 +55,13 @@ public class RedisKeys {
 
     public String selectResults(String marketplace, String geo) {
         return key(selectResultsPrefix, marketplace, geo);
+    }
+
+    public String searchTasks(String marketplace, String geo) {
+        return key(searchTasksPrefix, marketplace, geo);
+    }
+
+    public String searchResults(String marketplace, String geo) {
+        return key(searchResultsPrefix, marketplace, geo);
     }
 }

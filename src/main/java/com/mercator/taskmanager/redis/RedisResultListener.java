@@ -38,6 +38,7 @@ public class RedisResultListener {
     private final RedisKeys keys;
     private final ParseResultConsumer parseConsumer;
     private final SelectResultConsumer selectConsumer;
+    private final SearchResultConsumer searchConsumer;
     private final MarketplaceRepository marketplaceRepository;
     private final String geo;
 
@@ -48,8 +49,10 @@ public class RedisResultListener {
                                RedisKeys keys,
                                ParseResultConsumer parseConsumer,
                                SelectResultConsumer selectConsumer,
+                               SearchResultConsumer searchConsumer,
                                MarketplaceRepository marketplaceRepository,
                                @Value("${taskmanager.geo:Санкт-Петербург}") String geo) {
+        this.searchConsumer = searchConsumer;
         this.redis = redis;
         this.keys = keys;
         this.parseConsumer = parseConsumer;
@@ -67,15 +70,17 @@ public class RedisResultListener {
             return;
         }
 
-        pool = Executors.newFixedThreadPool(marketplaces.size() * 2);
+        pool = Executors.newFixedThreadPool(marketplaces.size() * 3);
 
         for (MarketplaceEntity marketplace : marketplaces) {
             String title = marketplace.getTitle();
             String parseKey;
             String selectKey;
+            String searchKey;
             try {
                 parseKey = keys.parseResults(title, geo);
                 selectKey = keys.selectResults(title, geo);
+                searchKey = keys.searchResults(title, geo);
             } catch (IllegalArgumentException e) {
                 // Маркетплейс есть в справочнике, но кода для ключа нет —
                 // пропускаем его, остальные слушаем как обычно.
@@ -85,7 +90,8 @@ public class RedisResultListener {
 
             pool.submit(() -> loop(parseKey, parseConsumer::handle, "обход/" + title));
             pool.submit(() -> loop(selectKey, selectConsumer::handle, "подбор/" + title));
-            log.info("RedisResultListener: слушаю {} и {}", parseKey, selectKey);
+            pool.submit(() -> loop(searchKey, searchConsumer::handle, "выдача/" + title));
+            log.info("RedisResultListener: слушаю {}, {} и {}", parseKey, selectKey, searchKey);
         }
     }
 
