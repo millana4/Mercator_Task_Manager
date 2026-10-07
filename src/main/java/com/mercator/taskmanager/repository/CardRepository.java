@@ -61,6 +61,21 @@ public interface CardRepository extends JpaRepository<CardEntity, UUID> {
             """, nativeQuery = true)
     void markMeasured(@Param("id") UUID id, @Param("now") OffsetDateTime now);
 
+    // Полный набор карточки (полный разбор): content_txt и время разбора
+    // перезаписываются, ТН ВЭД меняется только на непустое значение.
+    @Modifying
+    @Query(value = """
+            UPDATE card
+            SET content_txt = CAST(:content AS jsonb),
+                content_txt_parsed_at = :parsedAt,
+                tnved = COALESCE(CAST(:tnved AS text), tnved)
+            WHERE id = :id
+            """, nativeQuery = true)
+    int updateContent(@Param("id") UUID id,
+                      @Param("content") String content,
+                      @Param("parsedAt") OffsetDateTime parsedAt,
+                      @Param("tnved") String tnved);
+
     // Кандидаты для обхода в пределах одного маркетплейса: активные, которых
     // дольше всех не мерили, исключая уже отправленные (last_enqueued_at
     // свежее порога).
@@ -91,6 +106,30 @@ public interface CardRepository extends JpaRepository<CardEntity, UUID> {
             @Param("slowCategories") List<String> slowCategories,
             @Param("slowThreshold") OffsetDateTime slowThreshold,
             @Param("limit") int limit);
+
+
+
+    // Добор полного набора: активные карточки маркетплейса с пустым content_txt,
+    // кроме уже отправленных в обход (last_enqueued_at свежее порога).
+    // Маркетплейс — из сета страты или из ниши-создателя, как у обхода.
+    @Query(value = """
+            SELECT c.* FROM card c
+            LEFT JOIN stratum st ON st.id = c.stratum_id
+            LEFT JOIN subcategory sc ON sc.id = st.subcategory_id
+            LEFT JOIN "set" s ON s.id = sc.set_id
+            LEFT JOIN niche n ON n.id = c.niche_id
+            WHERE c.status = 'active'
+              AND c.content_txt IS NULL
+              AND COALESCE(s.marketplace_id, n.marketplace_id) = :marketplaceId
+              AND (c.last_enqueued_at IS NULL OR c.last_enqueued_at < :threshold)
+            ORDER BY c.last_measured_at ASC NULLS FIRST
+            LIMIT :limit
+            """, nativeQuery = true)
+    List<CardEntity> findContentBackfillCandidates(@Param("marketplaceId") Short marketplaceId,
+                                                   @Param("threshold") OffsetDateTime threshold,
+                                                   @Param("limit") int limit);
+
+
     // Карточка с таким sku на маркетплейсе (в любой страте или нише), активная — первой.
     // Для кандидатов ниши из выдачи: не заводить дубль уже существующей карточки.
     @Query(value = """

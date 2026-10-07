@@ -249,6 +249,7 @@ abstract class NicheTestSupport extends PostgresTestBase {
         c.put("category_path", "Одежда/Детям/Толстовки");
         c.put("characteristics", new LinkedHashMap<>(Map.of("Цвет", "розовый")));
         c.put("description", name);
+        c.put("full_content", true);
         if (inStock) {
             Map<String, Object> price = new LinkedHashMap<>();
             price.put("card_price", 1500.0);
@@ -294,6 +295,20 @@ abstract class NicheTestSupport extends PostgresTestBase {
             }
         }
         throw new AssertionError("Задача подбора " + taskId + " не найдена в очереди");
+    }
+
+    /** Задача обхода из очереди Redis по task_id. */
+    protected Map<?, ?> parseTask(UUID taskId) {
+        List<String> all = redis.opsForList().range(PARSE_TASKS, 0, -1);
+        if (all != null) {
+            for (String json : all) {
+                Map<?, ?> m = MAPPER.readValue(json, Map.class);
+                if (taskId.toString().equals(m.get("task_id"))) {
+                    return m;
+                }
+            }
+        }
+        throw new AssertionError("Задача обхода " + taskId + " не найдена в очереди");
     }
 
     protected List<String> excludeSkus(Map<?, ?> task) {

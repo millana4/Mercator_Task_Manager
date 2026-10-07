@@ -13,6 +13,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.OffsetDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.UUID;
 
 /**
@@ -23,6 +25,9 @@ import java.util.UUID;
  * не возвращается (её жизненный цикл решает категория) — создаётся своя,
  * карточки нет — создаётся новая. Иначе — unavailable.
  * Антибот — проверка снимается, кандидат снова участвует в выборе.
+ *
+ * Задача проверки идёт с полным разбором: новая карточка получает content_txt
+ * при создании, существующая — через writeFullContent.
  */
 @Service
 public class NicheVerificationService {
@@ -90,23 +95,39 @@ public class NicheVerificationService {
                 ? c.getCard()
                 : cardRepository.findBySkuAndMarketplace(c.getSku(), niche.getMarketplace().getId())
                 .orElse(null);
+        // карточка-кандидат, а на маркетплейсе уже есть активная с этим sku — берём активную
+        if (target != null && "candidate".equals(target.getStatus())) {
+            CardEntity active = cardRepository
+                    .findBySkuAndMarketplace(c.getSku(), niche.getMarketplace().getId())
+                    .filter(found -> "active".equals(found.getStatus()))
+                    .orElse(null);
+            if (active != null) {
+                target = active;
+            }
+        }
         // выбывшую карточку страты не возвращаем: её жизненный цикл решает категория
         if (target != null && target.getStratum() != null && !"active".equals(target.getStatus())) {
             target = null;
         }
 
         if (target == null) {
+            // новая карточка: content_txt пишется при создании
             target = cardWriteService.saveNicheCard(niche, geo, card, parserId);
             log.info("Ниша id={}: кандидат sku={} прошёл проверку, создана карточка",
                     niche.getId(), c.getSku());
-        } else if (!"active".equals(target.getStatus())) {
-            cardWriteService.writeMeasurementAndSnapshot(target.getId(), geo, card, parserId);
-            lifecycle.markInStock(target.getId());
-            log.info("Ниша id={}: кандидат sku={} прошёл проверку, карточка возвращена в обход",
-                    niche.getId(), c.getSku());
         } else {
-            log.info("Ниша id={}: кандидат sku={} прошёл проверку, карточка уже в обходе",
-                    niche.getId(), c.getSku());
+            if (!"active".equals(target.getStatus())) {
+                cardWriteService.writeMeasurementAndSnapshot(target.getId(), geo, card, parserId);
+                lifecycle.markInStock(target.getId());
+                log.info("Ниша id={}: кандидат sku={} прошёл проверку, карточка возвращена в обход",
+                        niche.getId(), c.getSku());
+            } else {
+                log.info("Ниша id={}: кандидат sku={} прошёл проверку, карточка уже в обходе",
+                        niche.getId(), c.getSku());
+            }
+            // существующая карточка: полный набор из результата проверки
+            cardWriteService.writeFullContent(target.getId(), card,
+                    OffsetDateTime.now().truncatedTo(ChronoUnit.SECONDS));
         }
 
         cardRepository.addToNiche(niche.getId(), target.getId());

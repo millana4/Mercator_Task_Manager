@@ -1,6 +1,5 @@
 package com.mercator.taskmanager.service;
 
-import com.mercator.taskmanager.contract.Ozon.OzonCard;
 import com.mercator.taskmanager.entity.CardEntity;
 import com.mercator.taskmanager.entity.NicheCandidateEntity;
 import com.mercator.taskmanager.entity.NicheEntity;
@@ -10,8 +9,6 @@ import com.mercator.taskmanager.repository.NicheCandidateRepository;
 import com.mercator.taskmanager.repository.NicheRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import tools.jackson.databind.PropertyNamingStrategies;
-import tools.jackson.databind.json.JsonMapper;
 
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
@@ -27,6 +24,10 @@ import java.util.UUID;
  * транзакции, в NicheRankingService.
  *
  * Состав ниши — niche_card: карточка может входить в несколько ниш.
+ * Карточка кандидата из выдачи создаётся при подборе (статус candidate);
+ * отбор в нишу переводит её в active, вытеснение из последней ниши — обратно
+ * в candidate. Если на маркетплейсе уже есть активная карточка с тем же sku,
+ * в нишу идёт она.
  */
 @Service
 public class NicheRankingStore {
@@ -34,24 +35,21 @@ public class NicheRankingStore {
     private final NicheRepository nicheRepository;
     private final NicheCandidateRepository candidateRepository;
     private final CardRepository cardRepository;
-    private final CardWriteService cardWriteService;
-    private final JsonMapper mapper = JsonMapper.builder()
-            .propertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE)
-            .build();
 
     public NicheRankingStore(NicheRepository nicheRepository,
                              NicheCandidateRepository candidateRepository,
-                             CardRepository cardRepository,
-                             CardWriteService cardWriteService) {
+                             CardRepository cardRepository) {
         this.nicheRepository = nicheRepository;
         this.candidateRepository = candidateRepository;
         this.cardRepository = cardRepository;
-        this.cardWriteService = cardWriteService;
     }
 
-    /** Кандидат без ленивых связей — для работы вне транзакции. */
+    /**
+     * Кандидат без ленивых связей — для работы вне транзакции.
+     * content — полный набор карточки (card.content_txt), null — его нет.
+     */
     public record CandidateView(UUID id, String sku, String source, UUID cardId,
-                                Map<String, Object> snapshot, boolean embedded,
+                                Map<String, Object> content, boolean embedded,
                                 Double similarity, String status) {
     }
 
@@ -75,10 +73,12 @@ public class NicheRankingStore {
     public List<CandidateView> loadCandidates(UUID nicheId) {
         List<CandidateView> views = new ArrayList<>();
         for (NicheCandidateEntity c : candidateRepository.findByNicheId(nicheId)) {
+            CardEntity card = c.getCard();
             views.add(new CandidateView(
                     c.getId(), c.getSku(), c.getSource(),
-                    c.getCard() != null ? c.getCard().getId() : null,
-                    c.getSnapshot(), c.getEmbedding() != null,
+                    card != null ? card.getId() : null,
+                    card != null ? card.getContentTxt() : null,
+                    c.getEmbedding() != null,
                     c.getSimilarity(), c.getStatus()));
         }
         return views;
@@ -104,7 +104,7 @@ public class NicheRankingStore {
      * выборка ниши, остальные ранее отобранные выбывают. Затем статус ниши:
      * отобрано plan-count — active (подбор завершён), иначе selecting с очищенной
      * задачей (следующая пачка на недостающее число). Пропущенные кандидаты
-     * (карточка выбыла из обхода, нет данных) в отобранные не входят.
+     * (карточка выбыла из обхода, нет карточки) в отобранные не входят.
      *
      * @return null — ниша уже не в статусе ranking (например, удалена)
      */
@@ -131,7 +131,7 @@ public class NicheRankingStore {
                     selected++;
                     continue;
                 }
-                CardEntity card = attachOrCreate(niche, c);
+                CardEntity card = attach(niche, c);
                 if (card == null) {
                     skipped++;
                     continue;
@@ -207,7 +207,8 @@ public class NicheRankingStore {
      * Автодобор, выбор: проход по rankedIds (по убыванию близости), пока есть места.
      *  - у кандидата активная карточка (обходится, данные свежие) — сразу в нишу;
      *  - выбывшая карточка страты — unavailable;
-     *  - новый кандидат последнего поиска (создан не раньше freshSince) — сразу в нишу;
+     *  - новый кандидат последнего поиска (карточка candidate, кандидат создан
+     *    не раньше freshSince) — сразу в нишу: данные только что спарсены;
      *  - исторический — место резервируется, verify_task_id; парсинг отправит вызывающий код.
      */
     @Transactional
@@ -250,10 +251,11 @@ public class NicheRankingStore {
             }
 
             // Новый кандидат последнего поиска — данные только что спарсены
-            boolean fresh = card == null && freshSince != null && c.getCreatedAt() != null
+            boolean fresh = (card == null || "candidate".equals(card.getStatus()))
+                    && freshSince != null && c.getCreatedAt() != null
                     && !c.getCreatedAt().isBefore(freshSince);
             if (fresh) {
-                CardEntity attached = attachOrCreate(niche, c);
+                CardEntity attached = attach(niche, c);
                 if (attached != null) {
                     c.setCard(attached);
                     c.setStatus("selected");
@@ -282,41 +284,31 @@ public class NicheRankingStore {
     }
 
     /**
-     * Карточка для отобранного кандидата: существующая (включить в нишу)
-     * или новая карточка, созданная для ниши, с первым замером.
+     * Включить кандидата в нишу. Карточка-кандидат (или кандидат без карточки,
+     * созданный до перехода на карточки candidate): если на маркетплейсе уже есть
+     * активная карточка с этим sku — берётся она, иначе карточка-кандидат
+     * переходит в active (попадает в обход).
      *
-     * @return null — взять нельзя: карточка выбыла из обхода или у кандидата
-     *         из выдачи нет данных (unavailable)
+     * @return null — взять нельзя: карточка выбыла из обхода или карточки нет
+     *         (кандидат без карточки — unavailable)
      */
-    private CardEntity attachOrCreate(NicheEntity niche, NicheCandidateEntity c) {
-        // Кандидат из страты или ранее созданная карточка
-        if (c.getCard() != null) {
-            return attachExisting(niche, c.getCard());
+    private CardEntity attach(NicheEntity niche, NicheCandidateEntity c) {
+        CardEntity card = c.getCard();
+        if (card == null || "candidate".equals(card.getStatus())) {
+            Optional<CardEntity> active = cardRepository
+                    .findBySkuAndMarketplace(c.getSku(), niche.getMarketplace().getId())
+                    .filter(found -> "active".equals(found.getStatus()));
+            if (active.isPresent()) {
+                card = active.get();
+            }
         }
-
-        // Кандидат из выдачи: такой sku уже есть на маркетплейсе?
-        Optional<CardEntity> existing =
-                cardRepository.findBySkuAndMarketplace(c.getSku(), niche.getMarketplace().getId());
-        if (existing.isPresent()) {
-            return attachExisting(niche, existing.get());
-        }
-
-        // Новая карточка, созданная для ниши, из данных подбора
-        if (c.getSnapshot() == null) {
+        if (card == null) {
             c.setStatus("unavailable");
             return null;
         }
-        Map<String, Object> data = new HashMap<>(c.getSnapshot());
-        Object parserId = data.remove("parser_id");
-        OzonCard card = mapper.convertValue(data, OzonCard.class);
-        CardEntity created = cardWriteService.saveNicheCard(niche, niche.getGeo().getTitle(), card,
-                parserId != null ? parserId.toString() : "");
-        cardRepository.addToNiche(niche.getId(), created.getId());
-        return created;
-    }
-
-    private CardEntity attachExisting(NicheEntity niche, CardEntity card) {
-        if (!"active".equals(card.getStatus())) {
+        if ("candidate".equals(card.getStatus())) {
+            card.setStatus("active");  // отобрана в нишу — в обход
+        } else if (!"active".equals(card.getStatus())) {
             return null;  // выбыла из обхода
         }
         cardRepository.addToNiche(niche.getId(), card.getId());
@@ -324,8 +316,9 @@ public class NicheRankingStore {
     }
 
     /**
-     * Карточка выпала из выборки ниши: убрать из состава. Карточка без страты
-     * выбывает из обхода, только если больше не входит ни в одну нишу.
+     * Карточка выпала из выборки ниши: убрать из состава. Карточка без страты,
+     * больше не входящая ни в одну нишу, становится кандидатом (из обхода уходит,
+     * в базе остаётся).
      */
     private void detach(NicheEntity niche, CardEntity card) {
         if (card == null) {
@@ -334,9 +327,9 @@ public class NicheRankingStore {
         cardRepository.removeFromNiche(niche.getId(), card.getId());
         if (card.getStratum() == null
                 && cardRepository.countNiches(card.getId()) == 0
-                && !"dropped".equals(card.getStatus())) {
-            card.setStatus("dropped");
-            card.setDroppedAt(OffsetDateTime.now());
+                && !"dropped".equals(card.getStatus())
+                && !"candidate".equals(card.getStatus())) {
+            card.setStatus("candidate");
         }
     }
 }

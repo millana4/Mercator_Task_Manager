@@ -10,16 +10,26 @@ import jakarta.persistence.Table;
 import lombok.Getter;
 import lombok.Setter;
 import org.hibernate.annotations.CreationTimestamp;
+import org.hibernate.annotations.DynamicUpdate;
+import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.annotations.UuidGenerator;
+import org.hibernate.type.SqlTypes;
 
 import java.time.OffsetDateTime;
+import java.util.Map;
 import java.util.UUID;
 
 /**
  * Сущность карточки — SKU, подобранный парсером под страту или для ниши.
  * name — последнее известное имя (снимок).
  * seller_id и collection нужны для формирования exclude при доборе.
- * Блок жизненного цикла: status, failedAttempts, отметки времени.
+ * Блок жизненного цикла: status (active | stale | dropped | candidate),
+ * failedAttempts, отметки времени. candidate — кандидат ниши, в обход
+ * и аналитику не попадает.
+ *
+ * content_txt — карточка от парсера целиком при полном разборе (все
+ * характеристики, описание, все переключатели вариантов); null — полного
+ * разбора ещё не было. tnved — код ТН ВЭД, когда Ozon его показывает.
  *
  * Связи: заполнено ровно одно — страта или ниша, для которой карточка создана
  * (ограничения card_stratum_or_niche_check и card_niche_owner_check в базе).
@@ -27,6 +37,7 @@ import java.util.UUID;
  */
 @Entity
 @Table(name = "card")
+@DynamicUpdate
 @Getter
 @Setter
 public class CardEntity {
@@ -79,6 +90,18 @@ public class CardEntity {
 
     @Column(name = "last_enqueued_at")
     private OffsetDateTime lastEnqueuedAt;
+
+    // Полный набор карточки от парсера (полный разбор)
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "content_txt", columnDefinition = "jsonb")
+    private Map<String, Object> contentTxt;
+
+    @Column(name = "content_txt_parsed_at")
+    private OffsetDateTime contentTxtParsedAt;
+
+    // Код ТН ВЭД (цифры)
+    @Column
+    private String tnved;
 
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)

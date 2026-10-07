@@ -32,6 +32,11 @@ import org.slf4j.LoggerFactory;
  * Новая карточка сразу получает первый замер, поэтому last_measured_at
  * ставится при создании тем же временем, что parsed_at замера. Иначе обход
  * (last_measured_at ASC NULLS FIRST) тут же отправил бы её на повторный парсинг.
+ *
+ * Полный разбор (full_content=true): карточка от парсера целиком пишется
+ * в content_txt, время разбора — в content_txt_parsed_at, код ТН ВЭД — в tnved
+ * (только непустой). Новая карточка получает их при создании, существующая —
+ * через writeFullContent.
  */
 @Service
 public class CardWriteService {
@@ -74,13 +79,39 @@ public class CardWriteService {
 
     /** Записать карточку, найденную для ниши (без страты). Возвращает созданную карточку. */
     public CardEntity saveNicheCard(NicheEntity niche, String geo, OzonCard card, String parserId) {
+        return saveNicheOwned(niche, geo, card, parserId, "active");
+    }
+
+    /**
+     * Записать кандидата ниши карточкой со статусом candidate: в обход и аналитику
+     * не попадает, пока не отобран в нишу. Первый замер и снимок — данные подбора.
+     */
+    public CardEntity saveNicheCandidate(NicheEntity niche, String geo, OzonCard card, String parserId) {
+        return saveNicheOwned(niche, geo, card, parserId, "candidate");
+    }
+
+    private CardEntity saveNicheOwned(NicheEntity niche, String geo, OzonCard card,
+                                      String parserId, String status) {
         OffsetDateTime measuredAt = OffsetDateTime.now();
         CardEntity entity = newCardEntity(card, measuredAt);
+        entity.setStatus(status);
         entity.setNiche(niche);
         CardEntity savedCard = cardRepository.save(entity);
 
         writeMeasurementAndSnapshot(savedCard.getId(), geo, card, parserId, measuredAt);
         return savedCard;
+    }
+
+    /**
+     * Полный набор существующей карточки (обход с полным разбором, проверка кандидата).
+     * Без full_content ничего не пишет. Возвращает true, если набор записан.
+     */
+    public boolean writeFullContent(UUID cardId, OzonCard card, OffsetDateTime parsedAt) {
+        if (!hasFullContent(card)) {
+            return false;
+        }
+        cardRepository.updateContent(cardId, json.toSnakeCaseJson(card), parsedAt, tnvedOrNull(card));
+        return true;
     }
 
     // Паспорт карточки (Postgres) без привязки к страте/нише.
@@ -95,6 +126,11 @@ public class CardWriteService {
         entity.setStatus("active");
         entity.setFailedAttempts(0);
         entity.setLastMeasuredAt(measuredAt);
+        if (hasFullContent(card)) {
+            entity.setContentTxt(json.toSnakeCaseMap(card));
+            entity.setContentTxtParsedAt(measuredAt);
+            entity.setTnved(tnvedOrNull(card));
+        }
         return entity;
     }
 
@@ -143,6 +179,15 @@ public class CardWriteService {
                 .embedding(List.of())
                 .build();
         snapshotRepository.insert(snap);
+    }
+
+    private static boolean hasFullContent(OzonCard card) {
+        return Boolean.TRUE.equals(card.getFullContent());
+    }
+
+    private static String tnvedOrNull(OzonCard card) {
+        String tnved = card.getTnved();
+        return tnved != null && !tnved.isBlank() ? tnved : null;
     }
 
     private Float parseFloat(String s) {

@@ -4,6 +4,7 @@ import com.mercator.taskmanager.clickhouse.Measurement;
 import com.mercator.taskmanager.clickhouse.MeasurementRepository;
 import com.mercator.taskmanager.repository.CardRepository;
 import com.mercator.taskmanager.service.CardLifecycleService;
+import com.mercator.taskmanager.service.CardWriteService;
 import com.mercator.taskmanager.service.NicheReferenceService;
 import com.mercator.taskmanager.service.NicheVerificationService;
 import org.slf4j.Logger;
@@ -19,7 +20,8 @@ import java.time.temporal.ChronoUnit;
 /**
  * Обрабатывает результат обхода (пришёл из Redis-списка parse:results:<гео>).
  * На успех: дописывает свежий замер в ClickHouse, карточка active,
- * проставляет last_measured_at (для потокового обхода).
+ * проставляет last_measured_at (для потокового обхода); при полном разборе
+ * (full_content) записывает полный набор карточки (content_txt, ТН ВЭД).
  * На неудачу: помечает карточку через жизненный цикл.
  *
  * Нишевые ветки (по task_id), замер обычным путём не пишется:
@@ -38,6 +40,7 @@ public class ParseResultConsumer {
     private final MeasurementRepository measurementRepository;
     private final CardLifecycleService lifecycle;
     private final CardRepository cardRepository;
+    private final CardWriteService cardWriteService;
     private final NicheReferenceService nicheReferenceService;
     private final NicheVerificationService nicheVerificationService;
     private final JsonMapper mapper = JsonMapper.builder()
@@ -47,11 +50,13 @@ public class ParseResultConsumer {
     public ParseResultConsumer(MeasurementRepository measurementRepository,
                                CardLifecycleService lifecycle,
                                CardRepository cardRepository,
+                               CardWriteService cardWriteService,
                                NicheReferenceService nicheReferenceService,
                                NicheVerificationService nicheVerificationService) {
         this.measurementRepository = measurementRepository;
         this.lifecycle = lifecycle;
         this.cardRepository = cardRepository;
+        this.cardWriteService = cardWriteService;
         this.nicheReferenceService = nicheReferenceService;
         this.nicheVerificationService = nicheVerificationService;
     }
@@ -112,10 +117,11 @@ public class ParseResultConsumer {
         }
 
         // Успех: пишем замер (в т.ч. для out_of_stock — факт отсутствия ценен).
+        OffsetDateTime measuredAt = OffsetDateTime.now().truncatedTo(ChronoUnit.SECONDS);
         Measurement m = Measurement.builder()
                 .cardId(result.getCardId())
                 .sku(result.getSku())
-                .parsedAt(OffsetDateTime.now().truncatedTo(ChronoUnit.SECONDS))
+                .parsedAt(measuredAt)
                 .geo(result.getGeo())
                 .cardPrice(card.getPrice() != null ? card.getPrice().getCardPrice() : null)
                 .price(card.getPrice() != null ? card.getPrice().getPrice() : null)
@@ -128,8 +134,12 @@ public class ParseResultConsumer {
         measurementRepository.insert(m);
 
         // Потоковый обход: отметить, что карточку только что померили.
-        cardRepository.markMeasured(result.getCardId(),
-                OffsetDateTime.now().truncatedTo(ChronoUnit.SECONDS));
+        cardRepository.markMeasured(result.getCardId(), measuredAt);
+
+        // Полный разбор: полный набор карточки (content_txt, ТН ВЭД).
+        if (cardWriteService.writeFullContent(result.getCardId(), card, measuredAt)) {
+            log.info("Обход card_id={}: записан полный набор карточки", result.getCardId());
+        }
 
         // Обновляем жизненный цикл по состоянию кнопки.
         if ("out_of_stock".equals(buttonState)) {

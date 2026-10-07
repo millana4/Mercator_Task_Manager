@@ -16,6 +16,9 @@ import static org.mockito.Mockito.verify;
  * Подбор останавливается, как только отобрано plan-count карточек; каждая
  * следующая пачка — на недостающее число, не больше select-batch-size (3).
  * Близость задаёт «#NN» в названии карточки (0.NN).
+ *
+ * Кандидат из выдачи сразу получает карточку со статусом candidate (первый
+ * замер, content_txt); отбор в нишу переводит её в active.
  */
 class NicheSelectionFlowTest extends NicheTestSupport {
 
@@ -26,11 +29,12 @@ class NicheSelectionFlowTest extends NicheTestSupport {
         NicheRef niche = createNiche(true, 3);
         UUID id = niche.id();
 
-        // ---------- 1. Референс ----------
+        // ---------- 1. Референс — полный разбор ----------
         scheduler.tick();
         assertThat(nicheStatus(id)).isEqualTo("reference_parsing");
         UUID refTask = uuid("SELECT reference_task_id FROM niche WHERE id = ?", id);
         assertThat(refTask).isNotNull();
+        assertThat(parseTask(refTask).get("full_content")).isEqualTo(true);
 
         parseConsumer.handle(referenceResult(refTask));
         assertThat(nicheStatus(id)).isEqualTo("query_generation");
@@ -50,24 +54,29 @@ class NicheSelectionFlowTest extends NicheTestSupport {
         assertThat(task1.get("is_seasonal")).isEqualTo(false);
         assertThat(excludeSkus(task1)).containsExactlyInAnyOrder(stratumSku(89), stratumSku(75));
 
-        // ---------- 3. Пачка 1: #80 #70 #60 — отобрано 3 из 3, подбор завершён ----------
+        // ---------- 3. Пачка 1: #80 #70 #60 — карточки-кандидаты ----------
         selectConsumer.handle(selectResult(batch1, 80, 70, 60));
         assertThat(nicheStatus(id)).isEqualTo("ranking");
+        assertThat(cardStatus(searchSku(80))).isEqualTo("candidate");
+        assertThat(str("SELECT content_txt->>'name' FROM card WHERE sku = ?", searchSku(70)))
+                .isEqualTo("Худи #70 для девочки");
 
+        // ---------- 4. Ранжирование — отобрано 3 из 3, подбор завершён ----------
         scheduler.tick();
         assertThat(members(id)).containsExactlyInAnyOrder(stratumSku(89), searchSku(80), stratumSku(75));
         assertThat(nicheStatus(id)).isEqualTo("active");
         assertThat(selectTaskId(id)).isNull();  // автодобор не должен считать поиск идущим
         assertThat(redis.opsForList().size(SELECT_TASKS)).isEqualTo(1L);  // второй пачки нет
 
-        // не вошедшие в нишу остаются кандидатами, карточки для них не создаются
+        // отобранная карточка — в обходе; не вошедшие — кандидаты с карточками candidate
+        assertThat(cardStatus(searchSku(80))).isEqualTo("active");
         assertThat(candidateStatus(id, searchSku(70))).isEqualTo("candidate");
         assertThat(candidateStatus(id, searchSku(60))).isEqualTo("candidate");
-        assertThat(cardStatus(searchSku(70))).isNull();
-        assertThat(cardStatus(searchSku(60))).isNull();
+        assertThat(cardStatus(searchSku(70))).isEqualTo("candidate");
+        assertThat(cardStatus(searchSku(60))).isEqualTo("candidate");
 
-        // первый замер записан только для созданной карточки C80
-        verify(measurementRepository, times(1)).insert(any(Measurement.class));
+        // первые замеры записаны при подборе для всех кандидатов из выдачи: C80, C70, C60
+        verify(measurementRepository, times(3)).insert(any(Measurement.class));
     }
 
     /** Страта-подсказка #89, plan 5: после первой пачки отобрано 3 — вторая пачка на остаток 2. */
@@ -109,7 +118,7 @@ class NicheSelectionFlowTest extends NicheTestSupport {
         assertThat(nicheStatus(id)).isEqualTo("active");
         assertThat(selectTaskId(id)).isNull();
 
-        // первые замеры для созданных карточек: C80, C70, C95, C60
+        // первые замеры при подборе для кандидатов из выдачи: C80, C70, C95, C60
         verify(measurementRepository, times(4)).insert(any(Measurement.class));
     }
 }

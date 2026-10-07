@@ -135,6 +135,7 @@ public class NicheRefillService {
             task.setSku(t.sku());
             task.setGeo(niche.getGeo().getTitle());
             task.setMarketplace(niche.getMarketplace().getTitle());
+            task.setFullContent(true);
             parseTaskProducer.send(task);
         }
 

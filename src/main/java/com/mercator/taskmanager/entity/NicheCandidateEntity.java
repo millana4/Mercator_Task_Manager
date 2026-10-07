@@ -15,13 +15,13 @@ import org.hibernate.annotations.UuidGenerator;
 import org.hibernate.type.SqlTypes;
 
 import java.time.OffsetDateTime;
-import java.util.Map;
 import java.util.UUID;
 
 /**
- * Кандидат подбора ниши: карточка из выдачи или из страты,
- * с эмбеддингом и близостью к референсу. Все кандидаты хранятся —
- * из них берётся автодобор.
+ * Кандидат подбора ниши: связь «ниша — карточка» с эмбеддингом и близостью
+ * к референсу. Карточка кандидата из выдачи создаётся сразу (статус candidate)
+ * или берётся существующая; данные кандидата — в card.content_txt и снимке
+ * ClickHouse. Все кандидаты хранятся — из них берётся автодобор.
  *
  * source: search | stratum | refill_search
  * status: candidate | selected | unavailable
@@ -47,15 +47,10 @@ public class NicheCandidateEntity {
     @Column(nullable = false)
     private String source;
 
-    // если кандидат — уже существующая карточка
+    // карточка кандидата
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "card_id")
     private CardEntity card;
-
-    // данные карточки от парсера (кандидаты из выдачи)
-    @JdbcTypeCode(SqlTypes.JSON)
-    @Column(columnDefinition = "jsonb")
-    private Map<String, Object> snapshot;
 
     // текст, по которому посчитан эмбеддинг
     @Column(name = "embed_text")

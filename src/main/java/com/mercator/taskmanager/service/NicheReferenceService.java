@@ -58,6 +58,7 @@ public class NicheReferenceService {
         task.setSku(niche.getReferenceSku());
         task.setGeo(niche.getGeo().getTitle());
         task.setMarketplace(niche.getMarketplace().getTitle());
+        task.setFullContent(true);
 
         niche.setReferenceTaskId(taskId);
         niche.setStatus(NicheStatus.REFERENCE_PARSING);

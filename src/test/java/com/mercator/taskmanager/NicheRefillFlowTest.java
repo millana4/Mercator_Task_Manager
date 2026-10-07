@@ -13,9 +13,10 @@ import static org.mockito.Mockito.verify;
 
 /**
  * Автодобор. После bringToActive (страта #75 #55, plan 3, пачка #80 #70 #60):
- * в нише C80, S75, C70; кандидаты: C60 (карточки нет), S55 (активная карточка страты).
- * Выбывают C80 и C70 → уборка, поиск на 4, ответ #97 #40 →
- * C97 сразу (новый кандидат поиска), C60 — на проверку (исторический кандидат).
+ * в нише C80, S75, C70; кандидаты: C60 (карточка candidate), S55 (активная карточка страты).
+ * Выбывают C80 и C70 → уборка, поиск на 4, ответ #97 #40 (карточки candidate) →
+ * C97 сразу (новый кандидат поиска), C60 — на проверку (исторический кандидат),
+ * задача проверки — с полным разбором.
  */
 class NicheRefillFlowTest extends NicheTestSupport {
 
@@ -26,6 +27,7 @@ class NicheRefillFlowTest extends NicheTestSupport {
         bringToActive(id);
         assertThat(nicheStatus(id)).isEqualTo("active");
         assertThat(members(id)).containsExactlyInAnyOrder(searchSku(80), stratumSku(75), searchSku(70));
+        assertThat(cardStatus(searchSku(60))).isEqualTo("candidate");
 
         // ---------- выбытие по жизненному циклу ----------
         exec("UPDATE card SET status = 'dropped', dropped_at = now() WHERE sku IN (?, ?)",
@@ -49,12 +51,16 @@ class NicheRefillFlowTest extends NicheTestSupport {
         selectConsumer.handle(selectResult(refillTask, 97, 40));
         assertThat(selectTaskId(id)).isNull();
         assertThat(candidateStatus(id, searchSku(97))).isEqualTo("candidate");
+        assertThat(cardStatus(searchSku(97))).isEqualTo("candidate");
 
-        // ---------- выбор: C97 — сразу, C60 — на проверку ----------
+        // ---------- выбор: C97 — сразу, C60 — на проверку с полным разбором ----------
         scheduler.tick();
         assertThat(members(id)).containsExactlyInAnyOrder(stratumSku(75), searchSku(97));
-        assertThat(uuid("SELECT verify_task_id FROM niche_candidate WHERE niche_id = ? AND sku = ?",
-                id, searchSku(60))).isNotNull();
+        assertThat(cardStatus(searchSku(97))).isEqualTo("active");
+        UUID verifyTask = uuid("SELECT verify_task_id FROM niche_candidate WHERE niche_id = ? AND sku = ?",
+                id, searchSku(60));
+        assertThat(verifyTask).isNotNull();
+        assertThat(parseTask(verifyTask).get("full_content")).isEqualTo(true);
         assertThat(selectTaskId(id)).isNull();  // дефицит закрыт — нового поиска нет
         return id;
     }
@@ -67,7 +73,7 @@ class NicheRefillFlowTest extends NicheTestSupport {
 
         parseConsumer.handle(verifyResult(verifyTask, searchSku(60), false));
         assertThat(candidateStatus(id, searchSku(60))).isEqualTo("unavailable");
-        assertThat(cardStatus(searchSku(60))).isNull();  // карточка не создаётся
+        assertThat(cardStatus(searchSku(60))).isEqualTo("candidate");  // в обход не попадает
 
         // освободившееся место — следующему: активная карточка страты S55, без проверки
         scheduler.tick();
@@ -76,7 +82,7 @@ class NicheRefillFlowTest extends NicheTestSupport {
     }
 
     @Test
-    void inStockCandidateGetsCreatedCard() {
+    void inStockCandidateCardBecomesActive() {
         UUID id = refillUntilVerification();
         UUID verifyTask = uuid("SELECT verify_task_id FROM niche_candidate WHERE niche_id = ? AND sku = ?",
                 id, searchSku(60));
@@ -87,7 +93,7 @@ class NicheRefillFlowTest extends NicheTestSupport {
         assertThat(candidateStatus(id, searchSku(60))).isEqualTo("selected");
         assertThat(members(id)).containsExactlyInAnyOrder(
                 stratumSku(75), searchSku(97), searchSku(60));
-        // замеры: C80, C70 (первичный подбор) + C97 (автодобор) + C60 (проверка)
-        verify(measurementRepository, times(4)).insert(any(Measurement.class));
+        // замеры: C80, C70, C60 (первичный подбор) + C97, C40 (поиск автодобора) + C60 (проверка)
+        verify(measurementRepository, times(6)).insert(any(Measurement.class));
     }
 }

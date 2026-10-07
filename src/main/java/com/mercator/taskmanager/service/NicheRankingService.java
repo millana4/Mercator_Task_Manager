@@ -23,8 +23,8 @@ import java.util.UUID;
  * Ранжирование кандидатов ниши.
  *
  * score — общий шаг для первичного подбора и автодобора: тексты новых
- * кандидатов (без эмбеддинга; из выдачи — из данных карточки, из страт —
- * из снимка в ClickHouse; без текста — unavailable), один запрос к эмбеддеру
+ * кандидатов (без эмбеддинга; из полного набора карточки content_txt, без
+ * него — из снимка в ClickHouse; без текста — unavailable), один запрос к эмбеддеру
  * (референс + новые), близость к референсу у всех кандидатов.
  *
  * rank — первичный подбор после каждой пачки: первые plan-count по близости —
@@ -68,7 +68,7 @@ public class NicheRankingService {
                 .toList();
 
         List<UUID> stratumCardIds = fresh.stream()
-                .filter(v -> v.snapshot() == null && v.cardId() != null)
+                .filter(v -> v.content() == null && v.cardId() != null)
                 .map(CandidateView::cardId)
                 .toList();
         Map<UUID, SnapshotText> chTexts = snapshotRepository.findTextsByCardIds(stratumCardIds);
@@ -78,8 +78,8 @@ public class NicheRankingService {
         List<CandidateView> toEmbed = new ArrayList<>();
         List<UUID> unavailable = new ArrayList<>();
         for (CandidateView v : fresh) {
-            String text = v.snapshot() != null
-                    ? EmbeddingTextBuilder.fromSnapshot(v.snapshot())
+            String text = v.content() != null
+                    ? EmbeddingTextBuilder.fromSnapshot(v.content())
                     : EmbeddingTextBuilder.fromClickhouse(chTexts.get(v.cardId()));
             if (text.isBlank()) {
                 unavailable.add(v.id());

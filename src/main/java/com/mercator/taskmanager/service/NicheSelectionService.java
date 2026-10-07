@@ -17,14 +17,13 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import tools.jackson.databind.PropertyNamingStrategies;
-import tools.jackson.databind.json.JsonMapper;
 
 import java.time.OffsetDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
@@ -44,7 +43,11 @@ import java.util.UUID;
  * есть карточки, ranking — если кандидаты есть, но не ранжированы, иначе failed.
  *
  * Автодобор (ниша active): задача на дефицит × candidate-multiplier. Новые
- * кандидаты — refill_search; ниша остаётся active, выбор делает NicheRefillService.
+ * кандидаты — refill_search; ниша остаётся active, выбор делает NicheRankingStore.
+ *
+ * Кандидат из выдачи сразу получает карточку: существующую с таким sku на
+ * маркетплейсе (её полный набор обновляется данными подбора) или новую со
+ * статусом candidate — в обход и аналитику она не попадает, пока не отобрана.
  *
  * Новые активные карточки страт-подсказок в обоих случаях — кандидаты stratum
  * (карточка может входить в несколько ниш).
@@ -57,16 +60,15 @@ public class NicheSelectionService {
     private final NicheRepository nicheRepository;
     private final NicheCandidateRepository candidateRepository;
     private final CardRepository cardRepository;
+    private final CardWriteService cardWriteService;
     private final SelectTaskProducer selectTaskProducer;
     private final int batchSize;
     private final long selectRetryDelayMinutes;
-    private final JsonMapper mapper = JsonMapper.builder()
-            .propertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE)
-            .build();
 
     public NicheSelectionService(NicheRepository nicheRepository,
                                  NicheCandidateRepository candidateRepository,
                                  CardRepository cardRepository,
+                                 CardWriteService cardWriteService,
                                  SelectTaskProducer selectTaskProducer,
                                  @Value("${taskmanager.niche.select-batch-size:10}")
                                  int batchSize,
@@ -75,6 +77,7 @@ public class NicheSelectionService {
         this.nicheRepository = nicheRepository;
         this.candidateRepository = candidateRepository;
         this.cardRepository = cardRepository;
+        this.cardWriteService = cardWriteService;
         this.selectTaskProducer = selectTaskProducer;
         this.batchSize = batchSize;
         this.selectRetryDelayMinutes = selectRetryDelayMinutes;
@@ -209,18 +212,18 @@ public class NicheSelectionService {
 
         int fromSearch = 0;
         if (result.getCards() != null) {
+            String geo = niche.getGeo().getTitle();
+            String parserId = result.getParserId() != null ? result.getParserId() : "";
+            OffsetDateTime parsedAt = OffsetDateTime.now().truncatedTo(ChronoUnit.SECONDS);
             for (OzonCard card : result.getCards()) {
                 if (card.getSku() == null || !known.add(card.getSku())) {
                     continue;
                 }
-                @SuppressWarnings("unchecked")
-                Map<String, Object> snapshot = mapper.convertValue(card, Map.class);
-                snapshot.put("parser_id", result.getParserId());  // метка парсера для первого замера
                 NicheCandidateEntity c = new NicheCandidateEntity();
                 c.setNiche(niche);
                 c.setSku(card.getSku());
                 c.setSource(source);
-                c.setSnapshot(snapshot);
+                c.setCard(candidateCard(niche, geo, card, parserId, parsedAt));
                 c.setStatus("candidate");
                 candidateRepository.save(c);
                 fromSearch++;
@@ -242,6 +245,21 @@ public class NicheSelectionService {
             fromStrata++;
         }
         return new int[]{fromSearch, fromStrata};
+    }
+
+    /**
+     * Карточка кандидата из выдачи: существующая с таким sku на маркетплейсе
+     * (полный набор обновляется данными подбора) или новая со статусом candidate.
+     */
+    private CardEntity candidateCard(NicheEntity niche, String geo, OzonCard card,
+                                     String parserId, OffsetDateTime parsedAt) {
+        Optional<CardEntity> existing =
+                cardRepository.findBySkuAndMarketplace(card.getSku(), niche.getMarketplace().getId());
+        if (existing.isPresent()) {
+            cardWriteService.writeFullContent(existing.get().getId(), card, parsedAt);
+            return existing.get();
+        }
+        return cardWriteService.saveNicheCandidate(niche, geo, card, parserId);
     }
 
     /** Сформировать и отправить задачу подбора; возвращает task_id. */
