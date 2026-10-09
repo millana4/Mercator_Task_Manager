@@ -2,6 +2,11 @@ spring:
   application:
     name: taskmanager
 
+  # --- Подбор аналогов ниши: группы вида изделия, признаки, веса ---
+  # Отдельный файл niche-matching.yml, выгружен из ноутбука разбора признаков.
+  config:
+    import: classpath:niche-matching.yml
+
   # --- JSON: как таск-менеджер и парсер сопоставляют имена полей ---
   # Парсер (Python) отдаёт snake_case (card_price, reviews_count).
   # Java-поля — camelCase (cardPrice). Эта стратегия переводит одно в другое
