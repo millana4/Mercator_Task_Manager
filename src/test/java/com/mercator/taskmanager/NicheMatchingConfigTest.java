@@ -20,7 +20,6 @@ class NicheMatchingConfigTest {
     @Test
     void configIsRead() {
         assertEquals(26, config.groupCount());
-        assertEquals(10, config.topN());
         assertEquals(0.90, config.textSimFloor(), 1e-9);
         assertEquals(0.99, config.textSimCeil(), 1e-9);
         var w = config.weights();
@@ -66,7 +65,7 @@ class NicheMatchingConfigTest {
         NicheMatchingProperties p = MatchingConfigLoader.loadProperties();
         List<Group> broken = new java.util.ArrayList<>(p.groups());
         broken.add(new Group("Дубль", List.of("Пуховик"), List.of("Материал")));
-        NicheMatchingProperties bad = new NicheMatchingProperties(p.topN(), p.weights(), p.textSimFloor(),
+        NicheMatchingProperties bad = new NicheMatchingProperties(p.weights(), p.textSimFloor(),
                 p.textSimCeil(), p.priceZeroRatio(), p.tempZeroDiff(), p.dupPriceTolerance(),
                 p.dupIgnoreKeys(), p.footGroups(), p.defaultFeatures(), broken);
 

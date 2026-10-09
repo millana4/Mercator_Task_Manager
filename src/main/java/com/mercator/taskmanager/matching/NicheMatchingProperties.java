@@ -14,7 +14,6 @@ import java.util.List;
  */
 @ConfigurationProperties("niche-matching")
 public record NicheMatchingProperties(
-        int topN,
         Weights weights,
         double textSimFloor,
         double textSimCeil,

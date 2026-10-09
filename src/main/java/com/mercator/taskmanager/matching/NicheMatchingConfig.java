@@ -66,10 +66,6 @@ public class NicheMatchingConfig {
         return key != null && dupIgnoreKeys.contains(key);
     }
 
-    public int topN() {
-        return props.topN();
-    }
-
     public Weights weights() {
         return props.weights();
     }
@@ -105,7 +101,6 @@ public class NicheMatchingConfig {
             require(g.types() != null && !g.types().isEmpty(), "у группы " + g.name() + " нет значений «Тип»");
         }
         require(p.defaultFeatures() != null && !p.defaultFeatures().isEmpty(), "нет признаков по умолчанию");
-        require(p.topN() > 0, "top-n должен быть больше 0");
         Weights w = p.weights();
         require(w != null, "нет весов");
         require(w.text() >= 0 && w.price() >= 0 && w.size() >= 0 && w.natural() >= 0 && w.temperature() >= 0,
