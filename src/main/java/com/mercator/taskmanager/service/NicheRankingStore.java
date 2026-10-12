@@ -4,6 +4,8 @@ import com.mercator.taskmanager.entity.CardEntity;
 import com.mercator.taskmanager.entity.NicheCandidateEntity;
 import com.mercator.taskmanager.entity.NicheEntity;
 import com.mercator.taskmanager.entity.NicheStatus;
+import com.mercator.taskmanager.matching.CardFeatures;
+import com.mercator.taskmanager.matching.DuplicateFilter;
 import com.mercator.taskmanager.repository.CardRepository;
 import com.mercator.taskmanager.repository.NicheCandidateRepository;
 import com.mercator.taskmanager.repository.NicheRepository;
@@ -13,21 +15,27 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
  * Транзакционная часть ранжирования и автодобора ниши: чтение кандидатов,
- * сохранение эмбеддингов, применение отбора. Обращение к эмбеддеру — вне
- * транзакции, в NicheRankingService.
+ * сохранение схожести, применение отбора. Расчёт схожести и обращение к эмбеддеру —
+ * вне транзакции, в NicheRankingService.
  *
  * Состав ниши — niche_card: карточка может входить в несколько ниш.
  * Карточка кандидата из выдачи создаётся при подборе (статус candidate);
  * отбор в нишу переводит её в active, вытеснение из последней ниши — обратно
  * в candidate. Если на маркетплейсе уже есть активная карточка с тем же sku,
  * в нишу идёт она.
+ *
+ * Подставленный размер модели (analog_sku отличается от sku карточки кандидата):
+ * карточки этого размера ещё нет — место резервируется, по analog_sku уходит
+ * проверочный парсинг (NicheVerificationService).
  */
 @Service
 public class NicheRankingStore {
@@ -49,24 +57,41 @@ public class NicheRankingStore {
      * content — полный набор карточки (card.content_txt), null — его нет.
      */
     public record CandidateView(UUID id, String sku, String source, UUID cardId,
-                                Map<String, Object> content, boolean embedded,
+                                Map<String, Object> content, String embedText, float[] embedding,
                                 Double similarity, String status) {
     }
 
-    /** Посчитанный эмбеддинг кандидата. */
-    public record Embedded(UUID candidateId, String text, float[] vector, double similarity) {
+    /**
+     * Схожесть кандидата для сохранения.
+     *
+     * @param similarity итоговая схожесть; null — кандидат отсеян фильтром
+     * @param analogSku  sku нужного размера; null — идёт сама карточка кандидата
+     */
+    public record ScoreUpdate(UUID candidateId, Double similarity, Map<String, Object> details,
+                              String rejectReason, String analogSku, String embedText, float[] embedding) {
     }
 
-    /** Итог применения отбора (первичный подбор); done — отобрано plan-count, ниша active. */
-    public record ApplyResult(int selected, int added, int removed, int skipped, boolean done) {
+    /** Кандидат, прошедший фильтр, в порядке убывания схожести. */
+    public record Choice(UUID candidateId, String analogSku, CardFeatures features) {
     }
 
-    /** Задача проверочного парсинга исторического кандидата. */
+    /** Задача проверочного парсинга: исторический кандидат или подставленный размер. */
     public record VerifyTask(UUID candidateId, UUID taskId, String sku) {
     }
 
+    /**
+     * Итог применения отбора (первичный подбор).
+     *
+     * @param selected в нише и на проверке
+     * @param reserved из них отправлено на проверку в этом проходе
+     * @param done     selected = plan-count, ниша active
+     */
+    public record ApplyResult(int selected, int added, int reserved, int removed, int skipped,
+                              int duplicates, List<VerifyTask> toVerify, boolean done) {
+    }
+
     /** Итог прохода автодобора. */
-    public record RefillResult(int taken, int unavailable, List<VerifyTask> toVerify) {
+    public record RefillResult(int taken, int unavailable, int duplicates, List<VerifyTask> toVerify) {
     }
 
     @Transactional(readOnly = true)
@@ -78,38 +103,56 @@ public class NicheRankingStore {
                     c.getId(), c.getSku(), c.getSource(),
                     card != null ? card.getId() : null,
                     card != null ? card.getContentTxt() : null,
-                    c.getEmbedding() != null,
+                    c.getEmbedText(), c.getEmbedding(),
                     c.getSimilarity(), c.getStatus()));
         }
         return views;
     }
 
+    /**
+     * Сохранить схожесть кандидатов. Пока кандидат на проверке, analog_sku не меняется:
+     * результат проверки должен относиться к тому sku, который отправлен.
+     */
     @Transactional
-    public void saveEmbeddings(List<Embedded> embedded, List<UUID> unavailable) {
-        for (Embedded e : embedded) {
-            candidateRepository.findById(e.candidateId()).ifPresent(c -> {
-                c.setEmbedText(e.text());
-                c.setEmbedding(e.vector());
-                c.setSimilarity(e.similarity());
-            });
+    public void saveScores(List<ScoreUpdate> updates) {
+        Map<UUID, ScoreUpdate> byId = new HashMap<>();
+        for (ScoreUpdate u : updates) {
+            byId.put(u.candidateId(), u);
         }
-        for (UUID id : unavailable) {
-            candidateRepository.findById(id).ifPresent(c -> c.setStatus("unavailable"));
+        for (NicheCandidateEntity c : candidateRepository.findAllById(byId.keySet())) {
+            ScoreUpdate u = byId.get(c.getId());
+            c.setSimilarity(u.similarity());
+            c.setScoreDetails(u.details());
+            c.setRejectReason(u.rejectReason());
+            c.setEmbedText(u.embedText());
+            c.setEmbedding(u.embedding());
+            if (c.getVerifyTaskId() == null) {
+                c.setAnalogSku(u.analogSku());
+            }
         }
     }
 
+    /** Ниша не может быть подобрана (например, нет референса). */
+    @Transactional
+    public void failNiche(UUID nicheId, String error) {
+        nicheRepository.findById(nicheId).ifPresent(niche -> {
+            niche.setStatus(NicheStatus.FAILED);
+            niche.setError(error);
+            niche.setSelectTaskId(null);
+        });
+    }
 
     /**
-     * Первичный подбор: первые plan-count из rankedIds (по убыванию близости) —
-     * выборка ниши, остальные ранее отобранные выбывают. Затем статус ниши:
-     * отобрано plan-count — active (подбор завершён), иначе selecting с очищенной
-     * задачей (следующая пачка на недостающее число). Пропущенные кандидаты
-     * (карточка выбыла из обхода, нет карточки) в отобранные не входят.
+     * Первичный подбор: кандидаты по убыванию схожести берутся, пока «в нише + на проверке»
+     * меньше plan-count; дубли (DuplicateFilter) пропускаются с причиной. Ранее взятые,
+     * не попавшие в первые plan-count, отсеянные фильтром или дублем, — выбывают.
+     * Затем статус ниши: набрано plan-count — active, иначе selecting с очищенной задачей
+     * (следующая пачка на недостающее число).
      *
      * @return null — ниша уже не в статусе ranking (например, удалена)
      */
     @Transactional
-    public ApplyResult applySelection(UUID nicheId, List<UUID> rankedIds) {
+    public ApplyResult applySelection(UUID nicheId, List<Choice> ranked, DuplicateFilter duplicates) {
         NicheEntity niche = nicheRepository.findById(nicheId).orElse(null);
         if (niche == null || !NicheStatus.RANKING.equals(niche.getStatus())) {
             return null;
@@ -117,30 +160,69 @@ public class NicheRankingStore {
 
         Map<UUID, NicheCandidateEntity> byId = candidatesById(nicheId);
         int planCount = niche.getPlanCount();
-        int selected = 0, added = 0, removed = 0, skipped = 0;
+        int selected = 0, added = 0, reserved = 0, removed = 0, skipped = 0, duplicateCount = 0;
+        List<VerifyTask> toVerify = new ArrayList<>();
+        Set<UUID> passed = new HashSet<>();
 
-        for (UUID id : rankedIds) {
-            NicheCandidateEntity c = byId.get(id);
+        for (Choice choice : ranked) {
+            NicheCandidateEntity c = byId.get(choice.candidateId());
             if (c == null) {
                 continue;
             }
+            passed.add(c.getId());
             boolean isSelected = "selected".equals(c.getStatus());
+            boolean verifying = c.getVerifyTaskId() != null;
 
-            if (selected < planCount) {
+            if (selected >= planCount) {
                 if (isSelected) {
-                    selected++;
-                    continue;
+                    detach(niche, c.getCard());
+                    c.setStatus("candidate");
+                    removed++;
                 }
-                CardEntity card = attach(niche, c);
-                if (card == null) {
-                    skipped++;
-                    continue;
+                continue;
+            }
+
+            String duplicate = duplicates.rejectReason(choice.features());
+            if (duplicate != null) {
+                c.setRejectReason(duplicate);
+                duplicateCount++;
+                if (isSelected) {
+                    detach(niche, c.getCard());
+                    c.setStatus("candidate");
+                    removed++;
                 }
-                c.setCard(card);
-                c.setStatus("selected");
+                continue;
+            }
+
+            if (isSelected || verifying) {
+                duplicates.take(choice.features());
                 selected++;
-                added++;
-            } else if (isSelected) {
+                continue;
+            }
+
+            if (needsVerification(c, choice)) {
+                toVerify.add(reserve(c, choice.analogSku()));
+                duplicates.take(choice.features());
+                selected++;
+                reserved++;
+                continue;
+            }
+
+            CardEntity card = attach(niche, c);
+            if (card == null) {
+                skipped++;
+                continue;
+            }
+            c.setCard(card);
+            c.setStatus("selected");
+            duplicates.take(choice.features());
+            selected++;
+            added++;
+        }
+
+        // Ранее взятые, отсеянные теперь фильтром (другой вид, другой пол), — из ниши
+        for (NicheCandidateEntity c : byId.values()) {
+            if ("selected".equals(c.getStatus()) && !passed.contains(c.getId()) && c.getRejectReason() != null) {
                 detach(niche, c.getCard());
                 c.setStatus("candidate");
                 removed++;
@@ -154,9 +236,8 @@ public class NicheRankingStore {
         niche.setSelectTaskId(null);
         niche.setStatus(done ? NicheStatus.ACTIVE : NicheStatus.SELECTING);
         niche.setError(null);
-        return new ApplyResult(selected, added, removed, skipped, done);
+        return new ApplyResult(selected, added, reserved, removed, skipped, duplicateCount, toVerify, done);
     }
-
 
     /**
      * Автодобор, уборка: карточки состава, выбывшие по жизненному циклу
@@ -181,7 +262,6 @@ public class NicheRankingStore {
         return dropped.size();
     }
 
-
     /**
      * Автодобор: снять проверки без результата дольше порога (задача потеряна).
      * Кандидат остаётся candidate и снова участвует в выборе.
@@ -202,33 +282,58 @@ public class NicheRankingStore {
         return released;
     }
 
-
     /**
-     * Автодобор, выбор: проход по rankedIds (по убыванию близости), пока есть места.
+     * Автодобор, выбор: проход по кандидатам (по убыванию схожести), пока есть места.
+     * Текущий состав и кандидаты на проверке сначала передаются в фильтр задвоений.
+     *  - дубль — пропуск с причиной;
+     *  - подставлен другой размер модели — место резервируется, проверка по analog_sku;
      *  - у кандидата активная карточка (обходится, данные свежие) — сразу в нишу;
      *  - выбывшая карточка страты — unavailable;
      *  - новый кандидат последнего поиска (карточка candidate, кандидат создан
      *    не раньше freshSince) — сразу в нишу: данные только что спарсены;
-     *  - исторический — место резервируется, verify_task_id; парсинг отправит вызывающий код.
+     *  - исторический — место резервируется, проверка по своему sku.
+     * Парсинг проверок отправляет вызывающий код.
      */
     @Transactional
-    public RefillResult applyRefill(UUID nicheId, List<UUID> rankedIds, int slots,
-                                    OffsetDateTime freshSince) {
+    public RefillResult applyRefill(UUID nicheId, List<Choice> ranked, DuplicateFilter duplicates,
+                                    int slots, OffsetDateTime freshSince) {
         NicheEntity niche = nicheRepository.findById(nicheId).orElse(null);
         if (niche == null || !NicheStatus.ACTIVE.equals(niche.getStatus())) {
-            return new RefillResult(0, 0, List.of());
+            return new RefillResult(0, 0, 0, List.of());
         }
 
         Map<UUID, NicheCandidateEntity> byId = candidatesById(nicheId);
-        int taken = 0, unavailable = 0;
+        for (Choice choice : ranked) {
+            NicheCandidateEntity c = byId.get(choice.candidateId());
+            if (c != null && ("selected".equals(c.getStatus()) || c.getVerifyTaskId() != null)) {
+                duplicates.take(choice.features());
+            }
+        }
+
+        int taken = 0, unavailable = 0, duplicateCount = 0;
         List<VerifyTask> toVerify = new ArrayList<>();
 
-        for (UUID id : rankedIds) {
+        for (Choice choice : ranked) {
             if (slots <= 0) {
                 break;
             }
-            NicheCandidateEntity c = byId.get(id);
+            NicheCandidateEntity c = byId.get(choice.candidateId());
             if (c == null || !"candidate".equals(c.getStatus()) || c.getVerifyTaskId() != null) {
+                continue;
+            }
+
+            String duplicate = duplicates.rejectReason(choice.features());
+            if (duplicate != null) {
+                c.setRejectReason(duplicate);
+                duplicateCount++;
+                continue;
+            }
+
+            // Подставлен другой размер модели — карточки этого размера ещё нет
+            if (needsVerification(c, choice)) {
+                toVerify.add(reserve(c, choice.analogSku()));
+                duplicates.take(choice.features());
+                slots--;
                 continue;
             }
 
@@ -238,6 +343,7 @@ public class NicheRankingStore {
             if (card != null && "active".equals(card.getStatus())) {
                 cardRepository.addToNiche(nicheId, card.getId());
                 c.setStatus("selected");
+                duplicates.take(choice.features());
                 taken++;
                 slots--;
                 continue;
@@ -259,20 +365,40 @@ public class NicheRankingStore {
                 if (attached != null) {
                     c.setCard(attached);
                     c.setStatus("selected");
+                    duplicates.take(choice.features());
                     taken++;
                     slots--;
                 }
                 continue;
             }
 
-            // Исторический — проверочный парсинг, место резервируется
-            UUID taskId = UUID.randomUUID();
-            c.setVerifyTaskId(taskId);
-            c.setVerifyRequestedAt(OffsetDateTime.now());
-            toVerify.add(new VerifyTask(c.getId(), taskId, c.getSku()));
+            // Исторический — проверочный парсинг своего sku, место резервируется
+            toVerify.add(reserve(c, null));
+            duplicates.take(choice.features());
             slots--;
         }
-        return new RefillResult(taken, unavailable, toVerify);
+        return new RefillResult(taken, unavailable, duplicateCount, toVerify);
+    }
+
+    /** Нужна проверка: подставлен размер, которого у кандидата нет карточки. */
+    private static boolean needsVerification(NicheCandidateEntity c, Choice choice) {
+        String cardSku = c.getCard() != null ? c.getCard().getSku() : c.getSku();
+        return choice.analogSku() != null && !choice.analogSku().equals(cardSku);
+    }
+
+    /**
+     * Зарезервировать место и задачу проверки.
+     *
+     * @param analogSku sku подставленного размера; null — проверяется своя карточка
+     */
+    private static VerifyTask reserve(NicheCandidateEntity c, String analogSku) {
+        UUID taskId = UUID.randomUUID();
+        c.setVerifyTaskId(taskId);
+        c.setVerifyRequestedAt(OffsetDateTime.now());
+        c.setAnalogSku(analogSku);
+        String sku = analogSku != null ? analogSku
+                : c.getCard() != null ? c.getCard().getSku() : c.getSku();
+        return new VerifyTask(c.getId(), taskId, sku);
     }
 
     private Map<UUID, NicheCandidateEntity> candidatesById(UUID nicheId) {

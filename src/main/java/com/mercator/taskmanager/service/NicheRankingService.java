@@ -1,37 +1,43 @@
 package com.mercator.taskmanager.service;
 
-import com.mercator.taskmanager.clickhouse.CardSnapshotRepository;
-import com.mercator.taskmanager.clickhouse.CardSnapshotRepository.SnapshotText;
-import com.mercator.taskmanager.embedding.EmbedderClient;
-import com.mercator.taskmanager.embedding.EmbeddingTextBuilder;
 import com.mercator.taskmanager.entity.NicheEntity;
+import com.mercator.taskmanager.matching.CardFeatureExtractor;
+import com.mercator.taskmanager.matching.CardFeatures;
+import com.mercator.taskmanager.matching.DuplicateFilter;
+import com.mercator.taskmanager.matching.NicheMatchingConfig;
+import com.mercator.taskmanager.matching.NicheScorer;
+import com.mercator.taskmanager.matching.NicheScorer.Candidate;
+import com.mercator.taskmanager.matching.NicheScorer.Scored;
+import com.mercator.taskmanager.redis.ParseTaskMessage;
+import com.mercator.taskmanager.redis.ParseTaskProducer;
 import com.mercator.taskmanager.service.NicheRankingStore.ApplyResult;
 import com.mercator.taskmanager.service.NicheRankingStore.CandidateView;
-import com.mercator.taskmanager.service.NicheRankingStore.Embedded;
+import com.mercator.taskmanager.service.NicheRankingStore.Choice;
+import com.mercator.taskmanager.service.NicheRankingStore.ScoreUpdate;
+import com.mercator.taskmanager.service.NicheRankingStore.VerifyTask;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
 /**
- * Ранжирование кандидатов ниши.
+ * Ранжирование кандидатов ниши по схожести с референсом (NicheScorer).
  *
- * score — общий шаг для первичного подбора и автодобора: тексты новых
- * кандидатов (без эмбеддинга; из полного набора карточки content_txt, без
- * него — из снимка в ClickHouse; без текста — unavailable), один запрос к эмбеддеру
- * (референс + новые), близость к референсу у всех кандидатов.
+ * score — общий шаг для первичного подбора и автодобора: признаки референса
+ * (reference_snapshot) и кандидатов (card.content_txt; без полного набора кандидат
+ * в этом раунде пропускается), схожесть, запись в кандидатов (similarity — итоговая
+ * схожесть, score_details, reject_reason, analog_sku, текст и вектор).
  *
- * rank — первичный подбор после каждой пачки: первые plan-count по близости —
- * выборка ниши. Отобрано plan-count — ниша active (подбор завершён), иначе
- * selecting: следующая пачка на недостающее число карточек (NicheSelectionService).
- * Решение принимает NicheRankingStore.applySelection — там известно, сколько
- * кандидатов действительно взято.
+ * rank — первичный подбор после каждой пачки: кандидаты по убыванию схожести
+ * без задвоений до plan-count; подставленный размер модели — на проверку.
+ * Набрано plan-count — ниша active, иначе selecting: следующая пачка
+ * (NicheSelectionService). Решение принимает NicheRankingStore.applySelection.
  *
  * @throws com.mercator.taskmanager.embedding.EmbedderException — эмбеддер
  *         недоступен; планировщик повторит
@@ -40,108 +46,148 @@ import java.util.UUID;
 public class NicheRankingService {
 
     private static final Logger log = LoggerFactory.getLogger(NicheRankingService.class);
+    static final String NO_REFERENCE = "Нет референса: аналоги подбираются только по карточке-референсу";
 
     private final NicheRankingStore store;
-    private final CardSnapshotRepository snapshotRepository;
-    private final EmbedderClient embedder;
+    private final CardFeatureExtractor extractor;
+    private final NicheScorer scorer;
+    private final NicheMatchingConfig config;
+    private final ParseTaskProducer parseTaskProducer;
 
     public NicheRankingService(NicheRankingStore store,
-                               CardSnapshotRepository snapshotRepository,
-                               EmbedderClient embedder) {
+                               CardFeatureExtractor extractor,
+                               NicheScorer scorer,
+                               NicheMatchingConfig config,
+                               ParseTaskProducer parseTaskProducer) {
         this.store = store;
-        this.snapshotRepository = snapshotRepository;
-        this.embedder = embedder;
+        this.extractor = extractor;
+        this.scorer = scorer;
+        this.config = config;
+        this.parseTaskProducer = parseTaskProducer;
     }
 
-    /** Кандидаты ниши и близость каждого к референсу (без unavailable). */
-    public record Scored(List<CandidateView> views, Map<UUID, Double> similarity,
-                         int embeddedCount, int unavailableCount) {
+    /**
+     * Итог расчёта схожести.
+     *
+     * @param choices   прошедшие фильтр, по убыванию схожести
+     * @param embedded  посчитано новых векторов
+     * @param noContent пропущено кандидатов без полного набора
+     * @param rejected  отсеяно фильтром (другой вид, другой пол)
+     */
+    public record Ranked(CardFeatures reference, List<Choice> choices, Map<UUID, Double> similarity,
+                         int embedded, int noContent, int rejected) {
     }
 
-    /** Эмбеддинги новых кандидатов и близость всех кандидатов к референсу. */
-    public Scored score(NicheEntity niche) {
+    /** Схожесть всех кандидатов ниши с референсом; результат записан в кандидатов. */
+    public Ranked score(NicheEntity niche) {
+        CardFeatures reference = extractor.extract(niche.getReferenceSnapshot());
         List<CandidateView> views = store.loadCandidates(niche.getId());
 
-        // ---------- 1. Тексты новых кандидатов ----------
-        List<CandidateView> fresh = views.stream()
-                .filter(v -> !v.embedded() && !"unavailable".equals(v.status()))
-                .toList();
-
-        List<UUID> stratumCardIds = fresh.stream()
-                .filter(v -> v.content() == null && v.cardId() != null)
-                .map(CandidateView::cardId)
-                .toList();
-        Map<UUID, SnapshotText> chTexts = snapshotRepository.findTextsByCardIds(stratumCardIds);
-
-        List<String> texts = new ArrayList<>();
-        texts.add(EmbeddingTextBuilder.forReference(niche));  // [0] — референс
-        List<CandidateView> toEmbed = new ArrayList<>();
-        List<UUID> unavailable = new ArrayList<>();
-        for (CandidateView v : fresh) {
-            String text = v.content() != null
-                    ? EmbeddingTextBuilder.fromSnapshot(v.content())
-                    : EmbeddingTextBuilder.fromClickhouse(chTexts.get(v.cardId()));
-            if (text.isBlank()) {
-                unavailable.add(v.id());
-            } else {
-                toEmbed.add(v);
-                texts.add(text);
-            }
-        }
-
-        // ---------- 2. Эмбеддинги и близость ----------
-        Map<UUID, Double> similarity = new HashMap<>();
+        List<Candidate> candidates = new ArrayList<>();
+        Map<UUID, CandidateView> viewById = new HashMap<>();
+        int noContent = 0;
         for (CandidateView v : views) {
-            if (v.embedded() && v.similarity() != null && !"unavailable".equals(v.status())) {
-                similarity.put(v.id(), v.similarity());
+            if ("unavailable".equals(v.status())) {
+                continue;
+            }
+            if (v.content() == null) {
+                noContent++;
+                continue;
+            }
+            viewById.put(v.id(), v);
+            candidates.add(new Candidate(v.id(), extractor.extract(v.content()), v.embedText(), v.embedding()));
+        }
+
+        List<Scored> scored = scorer.score(reference, candidates);
+
+        List<ScoreUpdate> updates = new ArrayList<>();
+        List<Choice> choices = new ArrayList<>();
+        Map<UUID, Double> similarity = new HashMap<>();
+        int embedded = 0, rejected = 0;
+        for (Scored s : scored) {
+            CandidateView v = viewById.get(s.id());
+            if (s.vector() != null && (v.embedding() == null || !s.text().equals(v.embedText()))) {
+                embedded++;
+            }
+            String analogSku = s.analogSku().equals(s.features().sku()) ? null : s.analogSku();
+            updates.add(new ScoreUpdate(s.id(), s.score(), details(s), s.rejectReason(), analogSku,
+                    s.passed() ? s.text() : null, s.passed() ? s.vector() : null));
+            if (s.passed()) {
+                choices.add(new Choice(s.id(), s.analogSku(), s.features()));
+                similarity.put(s.id(), s.score());
+            } else {
+                rejected++;
             }
         }
-
-        List<Embedded> embedded = new ArrayList<>();
-        if (!toEmbed.isEmpty()) {
-            List<float[]> vectors = embedder.embed(texts);
-            float[] reference = vectors.get(0);
-            for (int i = 0; i < toEmbed.size(); i++) {
-                float[] vector = vectors.get(i + 1);
-                double sim = EmbedderClient.similarity(reference, vector);
-                embedded.add(new Embedded(toEmbed.get(i).id(), texts.get(i + 1), vector, sim));
-                similarity.put(toEmbed.get(i).id(), sim);
-            }
-        }
-        if (!embedded.isEmpty() || !unavailable.isEmpty()) {
-            store.saveEmbeddings(embedded, unavailable);
-        }
-        return new Scored(views, similarity, embedded.size(), unavailable.size());
+        store.saveScores(updates);
+        return new Ranked(reference, choices, similarity, embedded, noContent, rejected);
     }
 
-    /** id кандидатов по убыванию близости. */
-    public static List<UUID> rankedIds(Map<UUID, Double> similarity) {
-        return similarity.entrySet().stream()
-                .sorted(Map.Entry.<UUID, Double>comparingByValue(Comparator.reverseOrder()))
-                .map(Map.Entry::getKey)
-                .toList();
+    /** Фильтр задвоений для набора аналогов этой ниши. */
+    public DuplicateFilter duplicateFilter(Ranked ranked) {
+        return new DuplicateFilter(config, ranked.reference());
     }
 
-    /** Первичный подбор: отбор plan-count ближайших после пачки. */
+    /** Первичный подбор: отбор plan-count самых похожих без задвоений после пачки. */
     public void rank(NicheEntity niche) {
-        Scored scored = score(niche);
-        List<UUID> ranked = rankedIds(scored.similarity());
+        if (niche.getReferenceSnapshot() == null) {
+            store.failNiche(niche.getId(), NO_REFERENCE);
+            log.warn("Ниша id={}: нет референса — failed", niche.getId());
+            return;
+        }
+        Ranked ranked = score(niche);
 
-        ApplyResult r = store.applySelection(niche.getId(), ranked);
+        ApplyResult r = store.applySelection(niche.getId(), ranked.choices(), duplicateFilter(ranked));
         if (r == null) {
             log.info("Ниша id={}: ранжирование не применено — статус уже изменился", niche.getId());
             return;
         }
+        sendVerifyTasks(niche, r.toVerify());
 
-        Map<UUID, Double> similarity = scored.similarity();
-        double best = ranked.isEmpty() ? 0 : similarity.get(ranked.get(0));
-        double worstSelected = r.selected() == 0 ? 0
-                : similarity.get(ranked.get(Math.min(r.selected(), ranked.size()) - 1));
-        log.info("Ниша id={}: ранжировано {} (новых эмбеддингов {}, unavailable {}); в нише {} из {} "
-                        + "(добавлено {}, выбыло {}, пропущено {}); близость {}–{} — {}",
-                niche.getId(), ranked.size(), scored.embeddedCount(), scored.unavailableCount(),
-                r.selected(), niche.getPlanCount(), r.added(), r.removed(), r.skipped(),
-                String.format("%.4f", worstSelected), String.format("%.4f", best),
+        List<Choice> choices = ranked.choices();
+        double best = choices.isEmpty() ? 0 : ranked.similarity().get(choices.get(0).candidateId());
+        log.info("Ниша id={}: прошли фильтр {} (отсеяно {}, без полного набора {}, новых векторов {}); "
+                        + "в нише и на проверке {} из {} (добавлено {}, на проверку {}, выбыло {}, пропущено {}, "
+                        + "дублей {}); лучшая схожесть {} — {}",
+                niche.getId(), choices.size(), ranked.rejected(), ranked.noContent(), ranked.embedded(),
+                r.selected(), niche.getPlanCount(), r.added(), r.reserved(), r.removed(), r.skipped(),
+                r.duplicates(), String.format("%.4f", best),
                 r.done() ? "подбор завершён (active)" : "следующая пачка");
+    }
+
+    /** Отправить проверочный парсинг (с полным разбором) кандидатов и подставленных размеров. */
+    public void sendVerifyTasks(NicheEntity niche, List<VerifyTask> tasks) {
+        for (VerifyTask t : tasks) {
+            ParseTaskMessage task = new ParseTaskMessage();
+            task.setTaskId(t.taskId());
+            task.setCardId(null);  // проверка кандидата, привязка — по task_id
+            task.setSku(t.sku());
+            task.setGeo(niche.getGeo().getTitle());
+            task.setMarketplace(niche.getMarketplace().getTitle());
+            task.setFullContent(true);
+            parseTaskProducer.send(task);
+        }
+    }
+
+    /** Составляющие схожести для score_details; null — кандидат отсеян фильтром. */
+    static Map<String, Object> details(Scored s) {
+        if (!s.passed()) {
+            return null;
+        }
+        Map<String, Object> d = new LinkedHashMap<>();
+        d.put("text", round(s.parts().text()));
+        d.put("price", round(s.parts().price()));
+        d.put("size", round(s.parts().size()));
+        d.put("natural", round(s.parts().natural()));
+        d.put("temperature", round(s.parts().temperature()));
+        d.put("cosine", round(s.cosine()));
+        d.put("analog_sku", s.analogSku());
+        d.put("size_label", s.sizeLabel());
+        d.put("unit_price", s.analogUnitPrice() == null ? null : Math.round(s.analogUnitPrice() * 100) / 100.0);
+        return d;
+    }
+
+    private static Double round(Double v) {
+        return v == null ? null : Math.round(v * 10000) / 10000.0;
     }
 }

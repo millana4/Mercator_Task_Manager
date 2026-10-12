@@ -15,16 +15,22 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.OffsetDateTime;
 import java.time.temporal.ChronoUnit;
+import java.util.Set;
 import java.util.UUID;
 
 /**
- * Результат проверочного парсинга исторического кандидата ниши (автодобор).
+ * Результат проверочного парсинга кандидата ниши: исторический кандидат автодобора
+ * или подставленный размер модели (analog_sku).
  *
+ * Проверяется sku: analog_sku, если подставлен размер, иначе sku карточки кандидата.
  * В наличии и есть цена — кандидат входит в нишу: выбывшая карточка ниши
  * возвращается в обход (замер + снимок, markInStock), выбывшая карточка страты
  * не возвращается (её жизненный цикл решает категория) — создаётся своя,
  * карточки нет — создаётся новая. Иначе — unavailable.
  * Антибот — проверка снимается, кандидат снова участвует в выборе.
+ *
+ * Проверка подставленного размера может вернуться ещё во время первичного подбора,
+ * поэтому результат принимается в статусах ranking, selecting и active.
  *
  * Задача проверки идёт с полным разбором: новая карточка получает content_txt
  * при создании, существующая — через writeFullContent.
@@ -33,6 +39,7 @@ import java.util.UUID;
 public class NicheVerificationService {
 
     private static final Logger log = LoggerFactory.getLogger(NicheVerificationService.class);
+    private static final Set<String> ACCEPTING = Set.of(NicheStatus.RANKING, NicheStatus.SELECTING, NicheStatus.ACTIVE);
 
     private final NicheCandidateRepository candidateRepository;
     private final CardRepository cardRepository;
@@ -64,16 +71,20 @@ public class NicheVerificationService {
         c.setVerifyTaskId(null);
         c.setVerifyRequestedAt(null);
 
-        if (!NicheStatus.ACTIVE.equals(niche.getStatus())) {
+        boolean substituted = c.getAnalogSku() != null;
+        String sku = substituted ? c.getAnalogSku()
+                : c.getCard() != null ? c.getCard().getSku() : c.getSku();
+
+        if (!ACCEPTING.contains(niche.getStatus())) {
             log.info("Ниша id={}: результат проверки sku={} пропущен, статус ниши {}",
-                    niche.getId(), c.getSku(), niche.getStatus());
+                    niche.getId(), sku, niche.getStatus());
             return;
         }
 
         // ---------- 1. Антибот — кандидат снова участвует в выборе ----------
         if ("antibot_blocked".equals(result.getErrorCode())) {
             log.warn("Ниша id={}: проверка sku={} заблокирована антиботом (parser_id={}), "
-                    + "место освобождено", niche.getId(), c.getSku(), result.getParserId());
+                    + "место освобождено", niche.getId(), sku, result.getParserId());
             return;
         }
 
@@ -83,22 +94,22 @@ public class NicheVerificationService {
         if (failure != null) {
             c.setStatus("unavailable");
             log.info("Ниша id={}: кандидат sku={} не прошёл проверку ({}), unavailable",
-                    niche.getId(), c.getSku(), failure);
+                    niche.getId(), sku, failure);
             return;
         }
 
         // ---------- 3. Проходит — в нишу ----------
         String geo = niche.getGeo().getTitle();
         String parserId = result.getParserId() != null ? result.getParserId() : "";
+        Short marketplaceId = niche.getMarketplace().getId();
 
-        CardEntity target = c.getCard() != null
+        // подставленный размер — своя карточка размера, иначе карточка кандидата
+        CardEntity target = !substituted && c.getCard() != null
                 ? c.getCard()
-                : cardRepository.findBySkuAndMarketplace(c.getSku(), niche.getMarketplace().getId())
-                .orElse(null);
+                : cardRepository.findBySkuAndMarketplace(sku, marketplaceId).orElse(null);
         // карточка-кандидат, а на маркетплейсе уже есть активная с этим sku — берём активную
         if (target != null && "candidate".equals(target.getStatus())) {
-            CardEntity active = cardRepository
-                    .findBySkuAndMarketplace(c.getSku(), niche.getMarketplace().getId())
+            CardEntity active = cardRepository.findBySkuAndMarketplace(sku, marketplaceId)
                     .filter(found -> "active".equals(found.getStatus()))
                     .orElse(null);
             if (active != null) {
@@ -113,17 +124,17 @@ public class NicheVerificationService {
         if (target == null) {
             // новая карточка: content_txt пишется при создании
             target = cardWriteService.saveNicheCard(niche, geo, card, parserId);
-            log.info("Ниша id={}: кандидат sku={} прошёл проверку, создана карточка",
-                    niche.getId(), c.getSku());
+            log.info("Ниша id={}: кандидат sku={} прошёл проверку, создана карточка{}",
+                    niche.getId(), sku, substituted ? " (подставленный размер)" : "");
         } else {
             if (!"active".equals(target.getStatus())) {
                 cardWriteService.writeMeasurementAndSnapshot(target.getId(), geo, card, parserId);
                 lifecycle.markInStock(target.getId());
                 log.info("Ниша id={}: кандидат sku={} прошёл проверку, карточка возвращена в обход",
-                        niche.getId(), c.getSku());
+                        niche.getId(), sku);
             } else {
                 log.info("Ниша id={}: кандидат sku={} прошёл проверку, карточка уже в обходе",
-                        niche.getId(), c.getSku());
+                        niche.getId(), sku);
             }
             // существующая карточка: полный набор из результата проверки
             cardWriteService.writeFullContent(target.getId(), card,

@@ -3,22 +3,17 @@ package com.mercator.taskmanager.service;
 import com.mercator.taskmanager.embedding.EmbedderException;
 import com.mercator.taskmanager.entity.NicheEntity;
 import com.mercator.taskmanager.entity.NicheStatus;
-import com.mercator.taskmanager.redis.ParseTaskMessage;
-import com.mercator.taskmanager.redis.ParseTaskProducer;
 import com.mercator.taskmanager.repository.CardRepository;
 import com.mercator.taskmanager.repository.NicheCandidateRepository;
 import com.mercator.taskmanager.repository.NicheRepository;
-import com.mercator.taskmanager.service.NicheRankingService.Scored;
 import com.mercator.taskmanager.service.NicheRankingStore.RefillResult;
-import com.mercator.taskmanager.service.NicheRankingStore.VerifyTask;
+import com.mercator.taskmanager.service.NicheRankingService.Ranked;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.time.OffsetDateTime;
-import java.util.List;
-import java.util.UUID;
 
 /**
  * Автодобор ниш (ниша остаётся active).
@@ -47,7 +42,6 @@ public class NicheRefillService {
     private final NicheSelectionService selectionService;
     private final NicheRankingService rankingService;
     private final NicheRankingStore store;
-    private final ParseTaskProducer parseTaskProducer;
     private final int candidateMultiplier;
     private final long refillIntervalHours;
     private final long selectTimeoutHours;
@@ -59,7 +53,6 @@ public class NicheRefillService {
                               NicheSelectionService selectionService,
                               NicheRankingService rankingService,
                               NicheRankingStore store,
-                              ParseTaskProducer parseTaskProducer,
                               @Value("${taskmanager.niche.candidate-multiplier:2}")
                               int candidateMultiplier,
                               @Value("${taskmanager.niche.refill-interval-hours:6}")
@@ -74,7 +67,6 @@ public class NicheRefillService {
         this.selectionService = selectionService;
         this.rankingService = rankingService;
         this.store = store;
-        this.parseTaskProducer = parseTaskProducer;
         this.candidateMultiplier = candidateMultiplier;
         this.refillIntervalHours = refillIntervalHours;
         this.selectTimeoutHours = selectTimeoutHours;
@@ -122,28 +114,21 @@ public class NicheRefillService {
             return;
         }
 
-        Scored scored = rankingService.score(niche);
-        List<UUID> ranked = NicheRankingService.rankedIds(scored.similarity());
-        RefillResult r = store.applyRefill(niche.getId(), ranked, (int) slots,
-                niche.getRefillRequestedAt());
-
-        // ---------- 3. Проверочный парсинг исторических кандидатов ----------
-        for (VerifyTask t : r.toVerify()) {
-            ParseTaskMessage task = new ParseTaskMessage();
-            task.setTaskId(t.taskId());
-            task.setCardId(null);  // проверка кандидата, привязка — по task_id
-            task.setSku(t.sku());
-            task.setGeo(niche.getGeo().getTitle());
-            task.setMarketplace(niche.getMarketplace().getTitle());
-            task.setFullContent(true);
-            parseTaskProducer.send(task);
+        if (niche.getReferenceSnapshot() == null) {
+            return;  // ниша без референса — подбор аналогов невозможен
         }
+        Ranked ranked = rankingService.score(niche);
+        RefillResult r = store.applyRefill(niche.getId(), ranked.choices(),
+                rankingService.duplicateFilter(ranked), (int) slots, niche.getRefillRequestedAt());
 
-        if (r.taken() + r.unavailable() + r.toVerify().size() > 0) {
-            log.info("Ниша id={}: автодобор — мест {}, взято сразу {}, на проверку {}, unavailable {} "
-                            + "(новых эмбеддингов {})",
+        // ---------- 3. Проверочный парсинг: исторические кандидаты и подставленные размеры ----------
+        rankingService.sendVerifyTasks(niche, r.toVerify());
+
+        if (r.taken() + r.unavailable() + r.duplicates() + r.toVerify().size() > 0) {
+            log.info("Ниша id={}: автодобор — мест {}, взято сразу {}, на проверку {}, unavailable {}, "
+                            + "дублей {} (новых векторов {})",
                     niche.getId(), slots, r.taken(), r.toVerify().size(), r.unavailable(),
-                    scored.embeddedCount());
+                    r.duplicates(), ranked.embedded());
         }
     }
 
