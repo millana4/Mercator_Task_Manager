@@ -92,6 +92,7 @@ taskmanager:
     # Снимки поисковой выдачи по стратам. Время - МСК, формат:
     # категория=ЧЧ:ММ[,ЧЧ:ММ];категория=ЧЧ:ММ
     enabled: ${SEARCH_SNAPSHOT_ENABLED:true}
+    schedule: ${SEARCH_SNAPSHOT_SCHEDULE:kids_clothing=06:37,18:37;clothing=18:37}
     # Задачи прогона раскладываются на окно (мин) и уходят в search:tasks по одной-две,
     # вперемешку с обходом. 0 — все задачи сразу, как ручной запуск.
     spread-minutes: ${SEARCH_SNAPSHOT_SPREAD_MINUTES:240}
