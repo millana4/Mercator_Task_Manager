@@ -20,8 +20,8 @@ import java.util.Optional;
 /**
  * Планировщик ниш: продвигает ниши по статусам.
  *
- * new со ссылкой       → отправить парсинг референса (reference_parsing)
- * new без ссылки       → query_generation
+ * new                  → отправить парсинг референса (reference_parsing);
+ *                        ссылки нет — failed (аналоги подбираются только по референсу)
  * reference_parsing:
  *   task_id сброшен (антибот)            → отправить повторно
  *   результат не пришёл за inflight-окно → отправить повторно
@@ -106,10 +106,10 @@ public class NicheScheduler {
             if (niche.getReferenceSku() != null) {
                 referenceService.sendReferenceTask(niche);
             } else {
-                niche.setStatus(NicheStatus.QUERY_GENERATION);
+                niche.setStatus(NicheStatus.FAILED);
+                niche.setError(NicheRankingService.NO_REFERENCE);
                 nicheRepository.save(niche);
-                log.info("Ниша id={}: ссылки нет, переход к генерации запроса по описанию",
-                        niche.getId());
+                log.warn("Ниша id={}: нет ссылки на референс — failed", niche.getId());
             }
         }
     }

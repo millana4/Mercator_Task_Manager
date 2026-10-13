@@ -1,7 +1,6 @@
 package com.mercator.taskmanager;
 
 import com.mercator.taskmanager.clickhouse.CardSnapshotRepository;
-import com.mercator.taskmanager.clickhouse.CardSnapshotRepository.SnapshotText;
 import com.mercator.taskmanager.clickhouse.MeasurementRepository;
 import com.mercator.taskmanager.controller.NicheCreateRequest;
 import com.mercator.taskmanager.embedding.EmbedderClient;
@@ -34,17 +33,14 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
@@ -120,9 +116,6 @@ abstract class NicheTestSupport extends PostgresTestBase {
                 .thenAnswer(inv -> llmAnswer(inv.getArgument(1)));
         when(embedder.embed(anyList()))
                 .thenAnswer(inv -> vectors(inv.getArgument(0)));
-        // старый путь текста карточек страт; новый подбор берёт content_txt
-        when(snapshotRepository.findTextsByCardIds(anyCollection()))
-                .thenAnswer(inv -> texts(inv.getArgument(0)));
     }
 
     @AfterEach
@@ -168,19 +161,15 @@ abstract class NicheTestSupport extends PostgresTestBase {
 
     /** Активная карточка страты с полным набором content (sku и name — из него). */
     protected void addStratumCard(StratumEntity st, Map<String, Object> content) {
-        String name = String.valueOf(content.get("name"));
-        UUID cardId = uuid("INSERT INTO card (stratum_id, sku, name, content_txt) "
-                        + "VALUES (?, ?, ?, ?::jsonb) RETURNING id",
-                st.getId(), String.valueOf(content.get("sku")), name, MAPPER.writeValueAsString(content));
-        stratumCardNames.put(cardId, name);
+        exec("INSERT INTO card (stratum_id, sku, name, content_txt) VALUES (?, ?, ?, ?::jsonb)",
+                st.getId(), String.valueOf(content.get("sku")), String.valueOf(content.get("name")),
+                MAPPER.writeValueAsString(content));
     }
 
     /** Активная карточка страты без полного набора (content_txt пуст). */
     protected void addStratumCardWithoutContent(StratumEntity st, int score) {
-        String name = "Худи страты #" + score;
-        UUID cardId = uuid("INSERT INTO card (stratum_id, sku, name) VALUES (?, ?, ?) RETURNING id",
-                st.getId(), stratumSku(score), name);
-        stratumCardNames.put(cardId, name);
+        exec("INSERT INTO card (stratum_id, sku, name) VALUES (?, ?, ?)",
+                st.getId(), stratumSku(score), "Худи страты #" + score);
     }
 
     /** Ниша через сервис; размер ниши: target 2, plan — planCount. */
@@ -426,17 +415,6 @@ abstract class NicheTestSupport extends PostgresTestBase {
                 v[0] = 1f;  // референс
             }
             out.add(v);
-        }
-        return out;
-    }
-
-    private Map<UUID, SnapshotText> texts(Collection<UUID> cardIds) {
-        Map<UUID, SnapshotText> out = new HashMap<>();
-        for (UUID id : cardIds) {
-            String name = stratumCardNames.get(id);
-            if (name != null) {
-                out.put(id, new SnapshotText(name, "Одежда/Детям/Толстовки", "", ""));
-            }
         }
         return out;
     }
