@@ -71,6 +71,8 @@ services:
   taskmanager:
     build: .
     container_name: tm-app
+    env_file:
+      - .env
     depends_on:
       postgres:
         condition: service_healthy

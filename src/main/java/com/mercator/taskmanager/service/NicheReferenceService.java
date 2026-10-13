@@ -27,8 +27,8 @@ import java.util.UUID;
  * Результат: по task_id ParseResultConsumer передаёт его сюда, замер не пишется.
  * Успех — данные карточки в reference_snapshot, ниша переходит к генерации
  * поискового запроса. Антибот — reference_task_id сбрасывается, планировщик
- * отправит задачу повторно. Референс недоступен — при наличии описания ниша
- * продолжает по описанию, без описания — failed.
+ * отправит задачу повторно. Референс недоступен — ниша failed: аналоги
+ * подбираются только по карточке-референсу, описание её не заменяет.
  */
 @Service
 public class NicheReferenceService {
@@ -107,17 +107,11 @@ public class NicheReferenceService {
             return;
         }
 
-        // ---------- 3. Референс недоступен ----------
-        if (niche.getDescription() != null) {
-            niche.setStatus(NicheStatus.QUERY_GENERATION);
-            log.warn("Ниша id={}: референс sku={} недоступен ({}), продолжаем по описанию",
-                    niche.getId(), niche.getReferenceSku(), failure);
-        } else {
-            niche.setStatus(NicheStatus.FAILED);
-            niche.setError("Референс недоступен: " + failure);
-            log.warn("Ниша id={}: референс sku={} недоступен ({}), описания нет — ниша failed",
-                    niche.getId(), niche.getReferenceSku(), failure);
-        }
+        // ---------- 3. Референс недоступен — ниша failed ----------
+        niche.setStatus(NicheStatus.FAILED);
+        niche.setError("Референс недоступен: " + failure);
+        log.warn("Ниша id={}: референс sku={} недоступен ({}) — ниша failed",
+                niche.getId(), niche.getReferenceSku(), failure);
     }
 
     /** Причина непригодности результата или null, если референс пригоден. */

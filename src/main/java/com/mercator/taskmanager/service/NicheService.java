@@ -69,8 +69,9 @@ public class NicheService {
         }
         String description = trimOrNull(req.description());
         String referenceUrl = trimOrNull(req.referenceUrl());
-        if (description == null && referenceUrl == null) {
-            throw new IllegalArgumentException("Нужно заполнить описание или ссылку на референс");
+        // аналоги подбираются только по карточке-референсу; описание — по желанию
+        if (referenceUrl == null) {
+            throw new IllegalArgumentException("Нужна ссылка на карточку-референс");
         }
 
         // ---------- 3. Связка должна соответствовать существующему сету ----------
@@ -84,9 +85,7 @@ public class NicheService {
         SetEntity set = sets.get(0);
 
         // ---------- 4. sku референса ----------
-        String referenceSku = referenceUrl == null
-                ? null
-                : urlParser.extractSku(set.getMarketplace().getTitle(), referenceUrl);
+        String referenceSku = urlParser.extractSku(set.getMarketplace().getTitle(), referenceUrl);
 
         // ---------- 5. Сохранение ----------
         NicheEntity niche = new NicheEntity();

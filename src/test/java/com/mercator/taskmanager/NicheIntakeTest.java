@@ -36,18 +36,19 @@ class NicheIntakeTest extends NicheTestSupport {
     @Test
     void rejectsUnknownSet() {
         assertThatThrownBy(() -> nicheService.create(new NicheCreateRequest(UUID.randomUUID(),
-                "ozon", "no_such_category", GEO, "худи", null)))
+                "ozon", "no_such_category", GEO, "худи",
+                "https://www.ozon.ru/product/hudi-" + REFERENCE_SKU + "/")))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Нет сета");
     }
 
     @Test
-    void rejectsEmptyDescriptionAndUrl() {
+    void rejectsMissingReferenceUrl() {
         createHintStratum();
         assertThatThrownBy(() -> nicheService.create(new NicheCreateRequest(UUID.randomUUID(),
-                "ozon", CATEGORY, GEO, "  ", null)))
+                "ozon", CATEGORY, GEO, "худи для девочки", null)))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("описание или ссылку");
+                .hasMessageContaining("ссылка на карточку-референс");
     }
 
     @Test
@@ -62,8 +63,8 @@ class NicheIntakeTest extends NicheTestSupport {
     @Test
     void deleteTransfersSharedCardsAndDropsOwnOnly() {
         StratumEntity st = createHintStratum();
-        NicheRef a = createNiche(false, 3);
-        NicheRef b = createNiche(false, 3);
+        NicheRef a = createNiche(true, 3);
+        NicheRef b = createNiche(true, 3);
 
         // карточка, созданная для A и входящая в A и B
         UUID shared = uuid("INSERT INTO card (niche_id, sku, name) VALUES (?, ?, 'shared') RETURNING id",

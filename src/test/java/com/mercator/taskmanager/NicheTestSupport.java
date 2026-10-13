@@ -54,8 +54,13 @@ import static org.mockito.Mockito.when;
  *
  * Настоящие Postgres и Redis (PostgresTestBase). Подмены:
  *  - нейросеть: запрос + номер страты-подсказки, найденный в промпте по hintItem;
- *  - эмбеддер: «#NN» в тексте даёт близость 0.NN к референсу (у референса «#» нет);
- *  - ClickHouse: замеры/снимки не пишутся, тексты карточек страт — из stratumCardNames.
+ *  - эмбеддер: «#NN» в тексте даёт косинус 0,90 + 0,09·NN/100 — после растяжения
+ *    (text-sim-floor 0,90, text-sim-ceil 0,99) текстовая близость ровно 0,NN;
+ *    у референса «#» нет — его вектор единичный;
+ *  - ClickHouse: замеры и снимки не пишутся.
+ * Карточки — с полным набором (content_txt), как от парсера при full_content=true:
+ * «Худи» для девочек, метка «#NN» — в «Цвете» (входит в текст, фильтр задвоений
+ * его не учитывает), «Коллекция» у каждой своя (в текст не входит, у референса её нет).
  * Планировщик ниш — раз в час (tick вызывается вручную), пачка подбора — 3 карточки.
  * Результаты парсера подаются прямо в консьюмеры, минуя Redis.
  */
@@ -73,7 +78,10 @@ abstract class NicheTestSupport extends PostgresTestBase {
     static final String SELECT_TASKS = "select:tasks:ozon:spb";
     static final String PARSE_TASKS = "parse:tasks:ozon:spb";
     static final String REFERENCE_SKU = "1234567890";
+    static final double PRICE = 1600.0;
 
+    private static final double TEXT_FLOOR = 0.90;
+    private static final double TEXT_CEIL = 0.99;
     private static final Pattern SCORE = Pattern.compile("#(\\d{2})");
     protected static final JsonMapper MAPPER = JsonMapper.builder().build();
 
@@ -112,6 +120,7 @@ abstract class NicheTestSupport extends PostgresTestBase {
                 .thenAnswer(inv -> llmAnswer(inv.getArgument(1)));
         when(embedder.embed(anyList()))
                 .thenAnswer(inv -> vectors(inv.getArgument(0)));
+        // старый путь текста карточек страт; новый подбор берёт content_txt
         when(snapshotRepository.findTextsByCardIds(anyCollection()))
                 .thenAnswer(inv -> texts(inv.getArgument(0)));
     }
@@ -152,12 +161,26 @@ abstract class NicheTestSupport extends PostgresTestBase {
         st = stratumRepository.save(st);
 
         for (int s : scores) {
-            String name = "Худи страты #" + s;
-            UUID cardId = uuid("INSERT INTO card (stratum_id, sku, name) VALUES (?, ?, ?) RETURNING id",
-                    st.getId(), stratumSku(s), name);
-            stratumCardNames.put(cardId, name);
+            addStratumCard(st, hoodie(stratumSku(s), "Худи страты #" + s, s, true));
         }
         return st;
+    }
+
+    /** Активная карточка страты с полным набором content (sku и name — из него). */
+    protected void addStratumCard(StratumEntity st, Map<String, Object> content) {
+        String name = String.valueOf(content.get("name"));
+        UUID cardId = uuid("INSERT INTO card (stratum_id, sku, name, content_txt) "
+                        + "VALUES (?, ?, ?, ?::jsonb) RETURNING id",
+                st.getId(), String.valueOf(content.get("sku")), name, MAPPER.writeValueAsString(content));
+        stratumCardNames.put(cardId, name);
+    }
+
+    /** Активная карточка страты без полного набора (content_txt пуст). */
+    protected void addStratumCardWithoutContent(StratumEntity st, int score) {
+        String name = "Худи страты #" + score;
+        UUID cardId = uuid("INSERT INTO card (stratum_id, sku, name) VALUES (?, ?, ?) RETURNING id",
+                st.getId(), stratumSku(score), name);
+        stratumCardNames.put(cardId, name);
     }
 
     /** Ниша через сервис; размер ниши: target 2, plan — planCount. */
@@ -194,27 +217,109 @@ abstract class NicheTestSupport extends PostgresTestBase {
         return prefix + "C" + score;
     }
 
+    // ---------- Карточки с полным набором ----------
+
+    /** «Худи #NN для девочки» в наличии, цена PRICE. */
+    protected Map<String, Object> hoodie(String sku, int score) {
+        return hoodie(sku, "Худи #" + score + " для девочки", score, true);
+    }
+
+    /**
+     * Карточка «Худи» для девочек с полным набором: «#NN» — в «Цвете» (текст эмбеддинга),
+     * «Коллекция» — своя у каждой карточки. В наличии — с ценой PRICE.
+     */
+    protected Map<String, Object> hoodie(String sku, String name, int score, boolean inStock) {
+        Map<String, String> full = new LinkedHashMap<>();
+        full.put("Тип", "Худи");
+        full.put("Пол", "Девочки");
+        full.put("Цвет", "розовый #" + score);
+        full.put("Материал", "футер");
+        full.put("Коллекция", "коллекция " + sku);
+
+        Map<String, Object> c = new LinkedHashMap<>();
+        c.put("sku", sku);
+        c.put("name", name);
+        c.put("url", "https://www.ozon.ru/product/it-" + sku + "/");
+        c.put("button_state", inStock ? "in_stock" : "out_of_stock");
+        c.put("category_path", "Одежда/Детям/Толстовки");
+        c.put("characteristics", new LinkedHashMap<>(Map.of("Цвет", "розовый")));
+        c.put("characteristics_full", full);
+        c.put("aspects", new ArrayList<Map<String, Object>>());
+        c.put("description", name);
+        c.put("full_content", true);
+        if (inStock) {
+            setPrice(c, PRICE);
+        }
+        return c;
+    }
+
+    /** Референс: «Худи для девочки розовое», признаки Цвет и Материал, без метки и коллекции. */
+    protected Map<String, Object> referenceCard() {
+        Map<String, Object> c = hoodie(REFERENCE_SKU, "Худи для девочки розовое", 0, true);
+        chars(c).put("Цвет", "розовый");
+        chars(c).remove("Коллекция");
+        return c;
+    }
+
+    @SuppressWarnings("unchecked")
+    protected static Map<String, String> chars(Map<String, Object> card) {
+        return (Map<String, String>) card.get("characteristics_full");
+    }
+
+    /** Цена карточки: price — основная (по ней цена за штуку), card_price на 100 меньше. */
+    protected static void setPrice(Map<String, Object> card, double price) {
+        Map<String, Object> p = new LinkedHashMap<>();
+        p.put("card_price", price - 100);
+        p.put("price", price);
+        p.put("original_price", price * 2);
+        card.put("price", p);
+    }
+
+    /** Переключатель вариантов: key «Color» / type «colorsMix» или key «size» / type «sizes». */
+    @SuppressWarnings("unchecked")
+    protected static void addAspect(Map<String, Object> card, String key, String type,
+                                    List<Map<String, Object>> values) {
+        Map<String, Object> aspect = new LinkedHashMap<>();
+        aspect.put("key", key);
+        aspect.put("name", "size".equals(key) ? "Размер" : "Цвет");
+        aspect.put("type", type);
+        aspect.put("values", values);
+        ((List<Map<String, Object>>) card.get("aspects")).add(aspect);
+    }
+
+    /** Значение переключателя в наличии. */
+    protected static Map<String, Object> aspectValue(String sku, String value, double price) {
+        Map<String, Object> v = new LinkedHashMap<>();
+        v.put("sku", sku);
+        v.put("value", value);
+        v.put("price", price);
+        v.put("availability", "inStock");
+        return v;
+    }
+
     // ---------- Сообщения парсера ----------
 
     protected String referenceResult(UUID taskId) {
-        Map<String, Object> card = new LinkedHashMap<>();
-        card.put("sku", REFERENCE_SKU);
-        card.put("name", "Худи для девочки розовое");
-        card.put("button_state", "in_stock");
-        card.put("category_path", "Одежда/Детям/Толстовки");
-        card.put("characteristics", new LinkedHashMap<>(Map.of("Цвет", "розовый")));
+        return referenceResult(taskId, referenceCard());
+    }
+
+    protected String referenceResult(UUID taskId, Map<String, Object> card) {
         return parseResult(taskId, REFERENCE_SKU, card);
     }
 
     protected String verifyResult(UUID taskId, String sku, boolean inStock) {
-        return parseResult(taskId, sku, card(sku, "Худи проверка " + sku, inStock));
+        return parseResult(taskId, sku, hoodie(sku, "Худи проверка " + sku, 50, inStock));
     }
 
     protected String selectResult(UUID taskId, int... scores) {
         List<Map<String, Object>> cards = new ArrayList<>();
         for (int s : scores) {
-            cards.add(card(searchSku(s), "Худи #" + s + " для девочки", true));
+            cards.add(hoodie(searchSku(s), s));
         }
+        return selectResultCards(taskId, cards);
+    }
+
+    protected String selectResultCards(UUID taskId, List<Map<String, Object>> cards) {
         Map<String, Object> msg = new LinkedHashMap<>();
         msg.put("task_id", taskId.toString());
         msg.put("set_id", null);
@@ -222,8 +327,8 @@ abstract class NicheTestSupport extends PostgresTestBase {
         msg.put("geo", GEO);
         msg.put("parser_id", "it");
         msg.put("ok", true);
-        msg.put("requested_count", scores.length);
-        msg.put("found_count", scores.length);
+        msg.put("requested_count", cards.size());
+        msg.put("found_count", cards.size());
         msg.put("cards", cards);
         return MAPPER.writeValueAsString(msg);
     }
@@ -238,26 +343,6 @@ abstract class NicheTestSupport extends PostgresTestBase {
         msg.put("ok", true);
         msg.put("card", card);
         return MAPPER.writeValueAsString(msg);
-    }
-
-    private Map<String, Object> card(String sku, String name, boolean inStock) {
-        Map<String, Object> c = new LinkedHashMap<>();
-        c.put("sku", sku);
-        c.put("name", name);
-        c.put("url", "https://www.ozon.ru/product/it-" + sku + "/");
-        c.put("button_state", inStock ? "in_stock" : "out_of_stock");
-        c.put("category_path", "Одежда/Детям/Толстовки");
-        c.put("characteristics", new LinkedHashMap<>(Map.of("Цвет", "розовый")));
-        c.put("description", name);
-        c.put("full_content", true);
-        if (inStock) {
-            Map<String, Object> price = new LinkedHashMap<>();
-            price.put("card_price", 1500.0);
-            price.put("price", 1600.0);
-            price.put("original_price", 3000.0);
-            c.put("price", price);
-        }
-        return c;
     }
 
     // ---------- Проверки ----------
@@ -334,9 +419,9 @@ abstract class NicheTestSupport extends PostgresTestBase {
             float[] v = new float[EmbedderClient.VECTOR_SIZE];
             Matcher m = SCORE.matcher(t);
             if (m.find()) {
-                double s = Integer.parseInt(m.group(1)) / 100.0;
-                v[0] = (float) s;
-                v[1] = (float) Math.sqrt(1 - s * s);
+                double cos = TEXT_FLOOR + (TEXT_CEIL - TEXT_FLOOR) * Integer.parseInt(m.group(1)) / 100.0;
+                v[0] = (float) cos;
+                v[1] = (float) Math.sqrt(1 - cos * cos);
             } else {
                 v[0] = 1f;  // референс
             }
