@@ -78,7 +78,7 @@ taskmanager:
     inflight-timeout-minutes: ${MONITORING_INFLIGHT_TIMEOUT_MINUTES:45}
     # Интервал планового обхода по категориям, ч: карточка попадает в обход,
     # когда с её замера прошёл интервал. Категории не из списка в обход не попадают.
-    intervals: ${MONITORING_INTERVALS:kids_clothing=10,clothing=24}
+    intervals: ${MONITORING_INTERVALS:kids_clothing=10,clothing=23}
     # Темп постановки = Σ(активных карточек категории / интервал) × rate-margin:
     # задачи идут равномерно; запас покрывает капчи и повторы.
     rate-margin: ${MONITORING_RATE_MARGIN:1.2}
