@@ -1,16 +1,19 @@
+
 package com.mercator.taskmanager.redis;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 /**
- * Строит ключи Redis-списков из префиксов (application.yaml), кода
- * маркетплейса и кода гео: "<prefix>:<маркетплейс>:<гео>", например
- * "parse:tasks:ozon:spb".
+ * Строит ключи Redis из префиксов (application.yaml), кода маркетплейса
+ * и кода гео: "<prefix>:<маркетплейс>:<гео>", например "parse:tasks:ozon:spb".
  *
  * Разделение по маркетплейсам позволяет настроить каждый парсер на свой
  * набор площадок: воркер делает BRPOP только по тем ключам, которые ему
  * разрешены в .env.
+ *
+ * reserveSignal — ключ-сигнал резервным парсерам: стоит, пока обход отстаёт
+ * (ставит MonitoringScheduler со сроком жизни).
  */
 @Component
 public class RedisKeys {
@@ -21,6 +24,7 @@ public class RedisKeys {
     private final String selectResultsPrefix;
     private final String searchTasksPrefix;
     private final String searchResultsPrefix;
+    private final String reserveSignalPrefix;
 
     public RedisKeys(
             @Value("${taskmanager.redis.parse-tasks-prefix}") String parseTasksPrefix,
@@ -28,13 +32,15 @@ public class RedisKeys {
             @Value("${taskmanager.redis.select-tasks-prefix}") String selectTasksPrefix,
             @Value("${taskmanager.redis.select-results-prefix}") String selectResultsPrefix,
             @Value("${taskmanager.redis.search-tasks-prefix:search:tasks}") String searchTasksPrefix,
-            @Value("${taskmanager.redis.search-results-prefix:search:results}") String searchResultsPrefix) {
+            @Value("${taskmanager.redis.search-results-prefix:search:results}") String searchResultsPrefix,
+            @Value("${taskmanager.redis.reserve-signal-prefix:monitoring:reserve}") String reserveSignalPrefix) {
         this.searchTasksPrefix = searchTasksPrefix;
         this.searchResultsPrefix = searchResultsPrefix;
         this.parseTasksPrefix = parseTasksPrefix;
         this.parseResultsPrefix = parseResultsPrefix;
         this.selectTasksPrefix = selectTasksPrefix;
         this.selectResultsPrefix = selectResultsPrefix;
+        this.reserveSignalPrefix = reserveSignalPrefix;
     }
 
     private String key(String prefix, String marketplace, String geo) {
@@ -63,5 +69,9 @@ public class RedisKeys {
 
     public String searchResults(String marketplace, String geo) {
         return key(searchResultsPrefix, marketplace, geo);
+    }
+
+    public String reserveSignal(String marketplace, String geo) {
+        return key(reserveSignalPrefix, marketplace, geo);
     }
 }

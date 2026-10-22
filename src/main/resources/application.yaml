@@ -76,10 +76,32 @@ taskmanager:
     # Окно ожидания результата, мин. Если по отправленной карточке результат
     # не пришёл за это время — она снова становится кандидатом (переотправка).
     inflight-timeout-minutes: ${MONITORING_INFLIGHT_TIMEOUT_MINUTES:45}
-    # Медленные категории (через запятую): карточка попадает в обход не чаще раза
-    # в slow-min-interval-hours часов - данные собираются, но реже. Пусто - все как можно чаще.
-    slow-categories: ${MONITORING_SLOW_CATEGORIES:clothing}
-    slow-min-interval-hours: ${MONITORING_SLOW_MIN_INTERVAL_HOURS:24}
+    # Интервал планового обхода по категориям, ч: карточка попадает в обход,
+    # когда с её замера прошёл интервал. Категории не из списка в обход не попадают.
+    intervals: ${MONITORING_INTERVALS:kids_clothing=10,clothing=24}
+    # Темп постановки = Σ(активных карточек категории / интервал) × rate-margin:
+    # задачи идут равномерно; запас покрывает капчи и повторы.
+    rate-margin: ${MONITORING_RATE_MARGIN:1.2}
+    reserve:
+      # Карточка просрочена, если без замера дольше интервала + lag-extra-hours.
+      lag-extra-hours: ${MONITORING_RESERVE_LAG_EXTRA_HOURS:1}
+      # Доля просроченных в какой-либо категории выше on-share — отставание:
+      # сигнал резервным парсерам, обход без ограничения темпа, учащение на паузе.
+      # Ниже off-share во всех категориях — отставание снято.
+      on-share: ${MONITORING_RESERVE_ON_SHARE:0.05}
+      off-share: ${MONITORING_RESERVE_OFF_SHARE:0.02}
+      # Срок жизни ключа сигнала, с: ядро не отвечает — ключ истекает, резерв останавливается.
+      signal-ttl-seconds: ${MONITORING_RESERVE_SIGNAL_TTL_SECONDS:120}
+    boost:
+      # Учащённый обход при резком скачке цены (price): |ln(новая / прошлая)| > ln(1 + threshold).
+      threshold: ${MONITORING_BOOST_THRESHOLD:0.35}
+      # Учащение снимается, когда цена вернулась к цене до скачка в пределах
+      # return-tolerance или продержалась hold-hours (новая реальная цена).
+      return-tolerance: ${MONITORING_BOOST_RETURN_TOLERANCE:0.03}
+      hold-hours: ${MONITORING_BOOST_HOLD_HOURS:48}
+      # Интервал обхода карточки на учащении, мин, и потолок карточек на учащении.
+      interval-minutes: ${MONITORING_BOOST_INTERVAL_MINUTES:60}
+      max-cards: ${MONITORING_BOOST_MAX_CARDS:30}
   redis:
     # Префиксы ключей списков задач/результатов (гео добавляется в коде).
     parse-tasks-prefix: ${REDIS_PARSE_TASKS_PREFIX:parse:tasks}
@@ -88,6 +110,8 @@ taskmanager:
     select-results-prefix: ${REDIS_SELECT_RESULTS_PREFIX:select:results}
     search-tasks-prefix: ${REDIS_SEARCH_TASKS_PREFIX:search:tasks}
     search-results-prefix: ${REDIS_SEARCH_RESULTS_PREFIX:search:results}
+    # Ключ-сигнал резервным парсерам: <prefix>:<маркетплейс>:<гео>, стоит пока обход отстаёт.
+    reserve-signal-prefix: ${REDIS_RESERVE_SIGNAL_PREFIX:monitoring:reserve}
   search-snapshot:
     # Снимки поисковой выдачи по стратам. Время - МСК, формат:
     # категория=ЧЧ:ММ[,ЧЧ:ММ];категория=ЧЧ:ММ

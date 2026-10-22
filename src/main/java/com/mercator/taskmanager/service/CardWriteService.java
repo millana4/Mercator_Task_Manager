@@ -126,6 +126,7 @@ public class CardWriteService {
         entity.setStatus("active");
         entity.setFailedAttempts(0);
         entity.setLastMeasuredAt(measuredAt);
+        entity.setLastPrice(card.getPrice() != null ? card.getPrice().getPrice() : null);
         if (hasFullContent(card)) {
             entity.setContentTxt(json.toSnakeCaseMap(card));
             entity.setContentTxtParsedAt(measuredAt);

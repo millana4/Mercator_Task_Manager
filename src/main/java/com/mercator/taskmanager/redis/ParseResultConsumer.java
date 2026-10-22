@@ -7,6 +7,7 @@ import com.mercator.taskmanager.service.CardLifecycleService;
 import com.mercator.taskmanager.service.CardWriteService;
 import com.mercator.taskmanager.service.NicheReferenceService;
 import com.mercator.taskmanager.service.NicheVerificationService;
+import com.mercator.taskmanager.service.PriceBoostService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -43,6 +44,7 @@ public class ParseResultConsumer {
     private final CardWriteService cardWriteService;
     private final NicheReferenceService nicheReferenceService;
     private final NicheVerificationService nicheVerificationService;
+    private final PriceBoostService priceBoostService;
     private final JsonMapper mapper = JsonMapper.builder()
             .propertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE)
             .build();
@@ -52,13 +54,15 @@ public class ParseResultConsumer {
                                CardRepository cardRepository,
                                CardWriteService cardWriteService,
                                NicheReferenceService nicheReferenceService,
-                               NicheVerificationService nicheVerificationService) {
+                               NicheVerificationService nicheVerificationService,
+                               PriceBoostService priceBoostService) {
         this.measurementRepository = measurementRepository;
         this.lifecycle = lifecycle;
         this.cardRepository = cardRepository;
         this.cardWriteService = cardWriteService;
         this.nicheReferenceService = nicheReferenceService;
         this.nicheVerificationService = nicheVerificationService;
+        this.priceBoostService = priceBoostService;
     }
 
     /** Обработать одно сообщение результата обхода (JSON). */
@@ -135,6 +139,9 @@ public class ParseResultConsumer {
 
         // Потоковый обход: отметить, что карточку только что померили.
         cardRepository.markMeasured(result.getCardId(), measuredAt);
+
+        // Скачок цены: учащённый обход, last_price.
+        priceBoostService.onMeasured(result.getCardId(), m.getPrice(), measuredAt);
 
         // Полный разбор: полный набор карточки (content_txt, ТН ВЭД).
         if (cardWriteService.writeFullContent(result.getCardId(), card, measuredAt)) {

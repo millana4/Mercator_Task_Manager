@@ -31,19 +31,6 @@ public interface CardRepository extends JpaRepository<CardEntity, UUID> {
     // Есть ли уже карточка с таким sku в этом сете, в любой его страте
     boolean existsByStratumSubcategorySetIdAndSku(UUID setId, String sku);
 
-    // Кандидаты для потокового обхода: активные, которых дольше всех не мерили
-    // (NULL — первыми), исключая те, что уже в очереди/в работе (last_enqueued_at
-    // свежее порога). :threshold — граница окна ожидания (now − inflight-timeout):
-    // карточки с last_enqueued_at старше порога или NULL снова становятся кандидатами.
-    @Query(value = """
-            SELECT * FROM card
-            WHERE status = 'active'
-              AND (last_enqueued_at IS NULL OR last_enqueued_at < :threshold)
-            ORDER BY last_measured_at ASC NULLS FIRST
-            LIMIT :limit
-            """, nativeQuery = true)
-    List<CardEntity> findQueueCandidates(@Param("threshold") OffsetDateTime threshold,
-                                         @Param("limit") int limit);
 
     // Пометить карточки отправленными (проставить last_enqueued_at) одним запросом.
     @Modifying
@@ -76,37 +63,95 @@ public interface CardRepository extends JpaRepository<CardEntity, UUID> {
                       @Param("parsedAt") OffsetDateTime parsedAt,
                       @Param("tnved") String tnved);
 
-    // Кандидаты для обхода в пределах одного маркетплейса: активные, которых
-    // дольше всех не мерили, исключая уже отправленные (last_enqueued_at
-    // свежее порога).
-    // Маркетплейс и категория карточки: из сета через card → stratum → subcategory → set,
-    // а у карточки без страты — из ниши-создателя. LEFT JOIN, чтобы карточки
-    // без страты тоже попадали в обход.
-    // Медленные категории (:slowCategories): карточка - кандидат, только если с
-    // последнего замера прошло больше :slowThreshold. Пустого списка не бывает:
-    // при пустой настройке передаётся [""] (категории без названия нет).
+
+    // ---------- Плановый обход по интервалам категорий ----------
+
+    // Просроченные карточки категории: с последнего замера прошёл интервал категории
+    // (:dueBefore = now − интервал), карточка не в работе (last_enqueued_at старше окна
+    // ожидания или NULL). Первыми — самые просроченные.
+    // Маркетплейс и категория — из сета страты или из ниши-создателя.
     @Query(value = """
             SELECT c.* FROM card c
             LEFT JOIN stratum st ON st.id = c.stratum_id
             LEFT JOIN subcategory sc ON sc.id = st.subcategory_id
             LEFT JOIN "set" s ON s.id = sc.set_id
             LEFT JOIN niche n ON n.id = c.niche_id
-            LEFT JOIN category cat ON cat.id = COALESCE(s.category_id, n.category_id)
+            JOIN category cat ON cat.id = COALESCE(s.category_id, n.category_id)
             WHERE c.status = 'active'
               AND COALESCE(s.marketplace_id, n.marketplace_id) = :marketplaceId
-              AND (c.last_enqueued_at IS NULL OR c.last_enqueued_at < :threshold)
-              AND (cat.title IS NULL OR cat.title NOT IN (:slowCategories)
-                   OR c.last_measured_at IS NULL OR c.last_measured_at < :slowThreshold)
+              AND cat.title = :category
+              AND (c.last_enqueued_at IS NULL OR c.last_enqueued_at < :inflightThreshold)
+              AND (c.last_measured_at IS NULL OR c.last_measured_at < :dueBefore)
             ORDER BY c.last_measured_at ASC NULLS FIRST
             LIMIT :limit
             """, nativeQuery = true)
-    List<CardEntity> findQueueCandidatesByMarketplace(
-            @Param("marketplaceId") Short marketplaceId,
-            @Param("threshold") OffsetDateTime threshold,
-            @Param("slowCategories") List<String> slowCategories,
-            @Param("slowThreshold") OffsetDateTime slowThreshold,
-            @Param("limit") int limit);
+    List<CardEntity> findDueCandidates(@Param("marketplaceId") Short marketplaceId,
+                                       @Param("category") String category,
+                                       @Param("dueBefore") OffsetDateTime dueBefore,
+                                       @Param("inflightThreshold") OffsetDateTime inflightThreshold,
+                                       @Param("limit") int limit);
 
+    // Активных карточек категории на маркетплейсе — для темпа обхода и доли просроченных.
+    @Query(value = """
+            SELECT count(*) FROM card c
+            LEFT JOIN stratum st ON st.id = c.stratum_id
+            LEFT JOIN subcategory sc ON sc.id = st.subcategory_id
+            LEFT JOIN "set" s ON s.id = sc.set_id
+            LEFT JOIN niche n ON n.id = c.niche_id
+            JOIN category cat ON cat.id = COALESCE(s.category_id, n.category_id)
+            WHERE c.status = 'active'
+              AND COALESCE(s.marketplace_id, n.marketplace_id) = :marketplaceId
+              AND cat.title = :category
+            """, nativeQuery = true)
+    long countActiveInCategory(@Param("marketplaceId") Short marketplaceId,
+                               @Param("category") String category);
+
+    // Активных карточек категории без замера с :overdueBefore — для сигнала резерва.
+    @Query(value = """
+            SELECT count(*) FROM card c
+            LEFT JOIN stratum st ON st.id = c.stratum_id
+            LEFT JOIN subcategory sc ON sc.id = st.subcategory_id
+            LEFT JOIN "set" s ON s.id = sc.set_id
+            LEFT JOIN niche n ON n.id = c.niche_id
+            JOIN category cat ON cat.id = COALESCE(s.category_id, n.category_id)
+            WHERE c.status = 'active'
+              AND COALESCE(s.marketplace_id, n.marketplace_id) = :marketplaceId
+              AND cat.title = :category
+              AND (c.last_measured_at IS NULL OR c.last_measured_at < :overdueBefore)
+            """, nativeQuery = true)
+    long countOverdueInCategory(@Param("marketplaceId") Short marketplaceId,
+                                @Param("category") String category,
+                                @Param("overdueBefore") OffsetDateTime overdueBefore);
+
+    // ---------- Учащённый обход после скачка цены ----------
+
+    // Карточки на учащении, у которых с замера прошёл интервал учащения
+    // (:dueBefore = now − интервал) и которые не в работе. Первыми — самые давние.
+    @Query(value = """
+            SELECT c.* FROM card c
+            LEFT JOIN stratum st ON st.id = c.stratum_id
+            LEFT JOIN subcategory sc ON sc.id = st.subcategory_id
+            LEFT JOIN "set" s ON s.id = sc.set_id
+            LEFT JOIN niche n ON n.id = c.niche_id
+            WHERE c.status = 'active'
+              AND c.boost_started_at IS NOT NULL
+              AND COALESCE(s.marketplace_id, n.marketplace_id) = :marketplaceId
+              AND (c.last_enqueued_at IS NULL OR c.last_enqueued_at < :inflightThreshold)
+              AND (c.last_measured_at IS NULL OR c.last_measured_at < :dueBefore)
+            ORDER BY c.last_measured_at ASC NULLS FIRST
+            LIMIT :limit
+            """, nativeQuery = true)
+    List<CardEntity> findBoostCandidates(@Param("marketplaceId") Short marketplaceId,
+                                         @Param("dueBefore") OffsetDateTime dueBefore,
+                                         @Param("inflightThreshold") OffsetDateTime inflightThreshold,
+                                         @Param("limit") int limit);
+
+    // Сколько активных карточек сейчас на учащении — для потолка.
+    @Query(value = """
+            SELECT count(*) FROM card
+            WHERE status = 'active' AND boost_started_at IS NOT NULL
+            """, nativeQuery = true)
+    long countBoosted();
 
 
     // Добор полного набора: активные карточки маркетплейса с пустым content_txt,

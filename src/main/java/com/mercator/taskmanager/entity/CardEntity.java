@@ -27,6 +27,10 @@ import java.util.UUID;
  * failedAttempts, отметки времени. candidate — кандидат ниши, в обход
  * и аналитику не попадает.
  *
+ *  last_price — цена (price) последнего замера с ценой. boost_base_price и
+ *  boost_started_at — учащённый обход после резкого скачка цены: цена до скачка
+ *  и начало учащения; boost_started_at = null — учащения нет.
+ *
  * content_txt — карточка от парсера целиком при полном разборе (все
  * характеристики, описание, все переключатели вариантов); null — полного
  * разбора ещё не было. tnved — код ТН ВЭД, когда Ozon его показывает.
@@ -102,6 +106,17 @@ public class CardEntity {
     // Код ТН ВЭД (цифры)
     @Column
     private String tnved;
+
+    // Цена (price) последнего замера с ценой — с ней сравнивается новая
+    @Column(name = "last_price")
+    private Double lastPrice;
+
+    // Учащённый обход после скачка цены: цена до скачка и начало учащения
+    @Column(name = "boost_base_price")
+    private Double boostBasePrice;
+
+    @Column(name = "boost_started_at")
+    private OffsetDateTime boostStartedAt;
 
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)

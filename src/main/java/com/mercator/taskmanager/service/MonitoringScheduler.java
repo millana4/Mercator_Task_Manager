@@ -15,33 +15,46 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
-import java.util.Arrays;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
- * Потоковый обход без барьера. Вместо «залить все active разом и ждать всех»
- * планировщик держит в Redis-очереди небольшой буфер задач и доливает его по
- * мере разбора воркерами.
+ * Плановый обход карточек через Redis-очередь parse:tasks:<маркетплейс>:<гео>.
  *
- * У каждого маркетплейса своя очередь и свой буфер: парсер, настроенный
- * только на одну площадку, всегда имеет что взять, и медленная площадка
- * не тормозит быструю.
+ * Интервал по категориям (intervals, часы): карточка — кандидат, только когда
+ * с её последнего замера прошёл интервал её категории. Первыми идут самые
+ * просроченные (раньше всех наступил срок). Категории не из списка в обход
+ * не попадают.
  *
- * Каждый тик, по каждому маркетплейсу:
- *   1. смотрит длину очереди parse:tasks:<маркетплейс>:<гео> (LLEN);
- *   2. добирает (buffer − LLEN) карточек-кандидатов этой площадки из Postgres:
- *      самые давно не мерянные (last_measured_at ASC NULLS FIRST), исключая
- *      те, что уже в работе (last_enqueued_at свежее окна ожидания);
- *   3. кладёт задачи в очередь (LPUSH) и помечает last_enqueued_at.
+ * Равномерность — «ведро жетонов»: каждый тик добавляет жетоны со скоростью
+ * Σ(активных карточек категории / интервал) × rate-margin, потолок — размер
+ * буфера. Плановых задач в тик ставится не больше, чем есть жетонов и места
+ * в буфере очереди. Так задачи идут ровным потоком, а не пачкой, когда у сотни
+ * карточек одновременно истёк интервал. Лишние жетоны не дают обхода чаще
+ * интервала: просроченных карточек для них нет.
  *
- * Равномерность: карточку обошли → обновился last_measured_at → она уходит
- * в хвост сортировки → вперёд выходят те, кого дольше не трогали.
+ * Отставание: в какой-либо категории доля карточек без замера дольше
+ * интервал + lag-extra-hours выше on-share. Пока отставание (снимается, когда
+ * доля во всех категориях ниже off-share):
+ *   - в Redis стоит ключ-сигнал резерва (со сроком жизни, обновляется каждый тик) —
+ *     резервные парсеры берут задачи обхода;
+ *   - плановый обход ставится без ограничения жетонами — до заполнения буфера;
+ *   - учащённый обход после скачков цены на паузе.
+ *
+ * Учащённый обход: карточки с boost_started_at (см. PriceBoostService) ставятся
+ * первыми, если с их замера прошло boost.interval-minutes.
+ *
  * Потерянные задачи сами вернутся в кандидаты, когда last_enqueued_at выйдет
- * за окно ожидания (inflight-timeout).
+ * за окно ожидания (inflight-timeout). Состояние (жетоны, отставание) — в памяти;
+ * перезапуск приложения начинает с пустого ведра.
  */
 @Component
 public class MonitoringScheduler {
@@ -57,8 +70,22 @@ public class MonitoringScheduler {
     private final int queueBuffer;
     private final long inflightTimeoutMinutes;
     private final String geo;
-    private final List<String> slowCategories;   // [""] - медленных категорий нет
-    private final long slowMinIntervalHours;
+    private final Map<String, Long> intervalHours;   // категория -> интервал обхода, ч
+    private final double rateMargin;
+    private final long lagExtraHours;
+    private final double reserveOnShare;
+    private final double reserveOffShare;
+    private final long signalTtlSeconds;
+    private final long boostIntervalMinutes;
+
+    /** Состояние маркетплейса между тиками: жетоны, время прошлого тика, отставание. */
+    static final class MarketplaceState {
+        double tokens;
+        OffsetDateTime lastTick;
+        boolean lagging;
+    }
+
+    private final Map<Short, MarketplaceState> states = new HashMap<>();
 
     public MonitoringScheduler(CardRepository cardRepository,
                                MarketplaceRepository marketplaceRepository,
@@ -68,14 +95,13 @@ public class MonitoringScheduler {
                                @Value("${taskmanager.monitoring.queue-buffer}") int queueBuffer,
                                @Value("${taskmanager.monitoring.inflight-timeout-minutes}") long inflightTimeoutMinutes,
                                @Value("${taskmanager.geo}") String geo,
-                               @Value("${taskmanager.monitoring.slow-categories:}") String slowCategories,
-                               @Value("${taskmanager.monitoring.slow-min-interval-hours:24}") long slowMinIntervalHours) {
-        List<String> slow = Arrays.stream(slowCategories.split(","))
-                .map(String::trim).filter(s -> !s.isEmpty()).toList();
-        this.slowCategories = slow.isEmpty() ? List.of("") : slow;
-        this.slowMinIntervalHours = slowMinIntervalHours;
-        log.info("Обход: медленные категории {} - не чаще раза в {} ч",
-                slow.isEmpty() ? "нет" : slow, slowMinIntervalHours);
+                               @Value("${taskmanager.monitoring.intervals}") String intervals,
+                               @Value("${taskmanager.monitoring.rate-margin}") double rateMargin,
+                               @Value("${taskmanager.monitoring.reserve.lag-extra-hours}") long lagExtraHours,
+                               @Value("${taskmanager.monitoring.reserve.on-share}") double reserveOnShare,
+                               @Value("${taskmanager.monitoring.reserve.off-share}") double reserveOffShare,
+                               @Value("${taskmanager.monitoring.reserve.signal-ttl-seconds}") long signalTtlSeconds,
+                               @Value("${taskmanager.monitoring.boost.interval-minutes}") long boostIntervalMinutes) {
         this.cardRepository = cardRepository;
         this.marketplaceRepository = marketplaceRepository;
         this.parseTaskProducer = parseTaskProducer;
@@ -84,6 +110,58 @@ public class MonitoringScheduler {
         this.queueBuffer = queueBuffer;
         this.inflightTimeoutMinutes = inflightTimeoutMinutes;
         this.geo = geo;
+        this.intervalHours = parseIntervals(intervals);
+        this.rateMargin = rateMargin;
+        this.lagExtraHours = lagExtraHours;
+        this.reserveOnShare = reserveOnShare;
+        this.reserveOffShare = reserveOffShare;
+        this.signalTtlSeconds = signalTtlSeconds;
+        this.boostIntervalMinutes = boostIntervalMinutes;
+        log.info("Обход: интервалы (ч) {}, запас темпа {}, отставание — доля старше интервал+{} ч выше {} "
+                        + "(снимается ниже {}), учащение раз в {} мин",
+                this.intervalHours, rateMargin, lagExtraHours, reserveOnShare, reserveOffShare,
+                boostIntervalMinutes);
+    }
+
+    /** "kids_clothing=10,clothing=24" -> {kids_clothing=10, clothing=24}. */
+    public static Map<String, Long> parseIntervals(String spec) {
+        Map<String, Long> out = new LinkedHashMap<>();
+        if (spec == null || spec.isBlank()) {
+            throw new IllegalArgumentException("Интервалы обхода не заданы (taskmanager.monitoring.intervals)");
+        }
+        for (String part : spec.split(",")) {
+            String p = part.trim();
+            if (p.isEmpty()) {
+                continue;
+            }
+            int eq = p.indexOf('=');
+            if (eq <= 0) {
+                throw new IllegalArgumentException(
+                        "Интервалы обхода: ожидалось категория=часы, получено '" + p + "'");
+            }
+            long hours = Long.parseLong(p.substring(eq + 1).trim());
+            if (hours <= 0) {
+                throw new IllegalArgumentException("Интервал обхода должен быть больше нуля: '" + p + "'");
+            }
+            out.put(p.substring(0, eq).trim(), hours);
+        }
+        return out;
+    }
+
+    /** Новое значение отставания с порогами включения и снятия (гистерезис). */
+    public static boolean nextLagging(boolean lagging, double maxOverdueShare, double onShare, double offShare) {
+        if (!lagging && maxOverdueShare > onShare) {
+            return true;
+        }
+        if (lagging && maxOverdueShare < offShare) {
+            return false;
+        }
+        return lagging;
+    }
+
+    /** Жетоны после тика: прибавка по темпу (в час) за прошедшие секунды, не выше потолка. */
+    public static double nextTokens(double tokens, double ratePerHour, double elapsedSeconds, double cap) {
+        return Math.min(cap, tokens + ratePerHour * Math.max(elapsedSeconds, 0) / 3600.0);
     }
 
     /**
@@ -104,43 +182,130 @@ public class MonitoringScheduler {
         }
     }
 
-    private void refillMarketplace(MarketplaceEntity marketplace) {
+    void refillMarketplace(MarketplaceEntity marketplace) {
         String title = marketplace.getTitle();
-        String queueKey = keys.parseTasks(title, geo);
+        Short marketplaceId = marketplace.getId();
+        OffsetDateTime now = OffsetDateTime.now().truncatedTo(ChronoUnit.SECONDS);
+        MarketplaceState state = states.computeIfAbsent(marketplaceId, id -> new MarketplaceState());
 
+        // 1. Темп и отставание по категориям.
+        double ratePerHour = 0;
+        double maxOverdueShare = 0;
+        String worstCategory = null;
+        for (Map.Entry<String, Long> e : intervalHours.entrySet()) {
+            long total = cardRepository.countActiveInCategory(marketplaceId, e.getKey());
+            if (total == 0) {
+                continue;
+            }
+            ratePerHour += (double) total / e.getValue() * rateMargin;
+            long overdue = cardRepository.countOverdueInCategory(marketplaceId, e.getKey(),
+                    now.minusHours(e.getValue() + lagExtraHours));
+            double share = (double) overdue / total;
+            if (share > maxOverdueShare) {
+                maxOverdueShare = share;
+                worstCategory = e.getKey();
+            }
+        }
+        boolean wasLagging = state.lagging;
+        state.lagging = nextLagging(wasLagging, maxOverdueShare, reserveOnShare, reserveOffShare);
+        if (state.lagging != wasLagging) {
+            if (state.lagging) {
+                log.warn("Обход {} отстаёт: просрочено {}% карточек категории {} — резерв включён, "
+                                + "темп без ограничения, учащение на паузе",
+                        title, Math.round(maxOverdueShare * 1000) / 10.0, worstCategory);
+            } else {
+                log.info("Обход {} догнал график: просрочено не больше {}% — резерв выключен",
+                        title, Math.round(maxOverdueShare * 1000) / 10.0);
+            }
+        }
+        publishReserveSignal(title, state.lagging);
+
+        // 2. Жетоны за время с прошлого тика.
+        double elapsed = state.lastTick == null ? 0 : Duration.between(state.lastTick, now).getSeconds();
+        state.tokens = nextTokens(state.tokens, ratePerHour, elapsed, queueBuffer);
+        state.lastTick = now;
+
+        // 3. Место в буфере очереди.
+        String queueKey = keys.parseTasks(title, geo);
         Long len = redis.opsForList().size(queueKey);
         int inQueue = (len == null) ? 0 : len.intValue();
-        int need = queueBuffer - inQueue;
-        if (need <= 0) {
+        int free = queueBuffer - inQueue;
+        if (free <= 0) {
             return;  // очередь уже полна — ничего не доливаем
         }
+        OffsetDateTime inflightThreshold = now.minusMinutes(inflightTimeoutMinutes);
 
-        OffsetDateTime now = OffsetDateTime.now().truncatedTo(ChronoUnit.SECONDS);
-        OffsetDateTime threshold = now.minusMinutes(inflightTimeoutMinutes);
-
-        List<CardEntity> candidates = cardRepository.findQueueCandidatesByMarketplace(
-                marketplace.getId(), threshold,
-                slowCategories, now.minusHours(slowMinIntervalHours), need);
-        if (candidates.isEmpty()) {
-            return;  // нет активных, кого пора обойти
+        // 4. Учащённый обход — первым, если нет отставания.
+        int boosted = 0;
+        if (!state.lagging) {
+            List<CardEntity> boost = cardRepository.findBoostCandidates(marketplaceId,
+                    now.minusMinutes(boostIntervalMinutes), inflightThreshold, free);
+            boosted = enqueue(boost, title, now);
+            free -= boosted;
         }
 
-        List<UUID> enqueuedIds = new ArrayList<>(candidates.size());
-        for (CardEntity card : candidates) {
+        // 5. Плановый обход: при отставании — до заполнения буфера, иначе — по жетонам.
+        int limit = state.lagging ? free : Math.min(free, (int) Math.floor(state.tokens));
+        int planned = 0;
+        if (limit > 0) {
+            List<CardEntity> due = dueCandidates(marketplaceId, now, inflightThreshold, limit);
+            planned = enqueue(due, title, now);
+            if (!state.lagging) {
+                state.tokens -= planned;
+            }
+        }
+
+        if (boosted + planned > 0) {
+            log.info("Обход: долив очереди {} — было {}, учащённых {}, плановых {} (жетонов {}, отставание {})",
+                    queueKey, inQueue, boosted, planned, Math.round(state.tokens * 10) / 10.0,
+                    state.lagging ? "да" : "нет");
+        }
+    }
+
+    /** Просроченные карточки всех категорий, по сроку (замер + интервал), не больше limit. */
+    private List<CardEntity> dueCandidates(Short marketplaceId, OffsetDateTime now,
+                                           OffsetDateTime inflightThreshold, int limit) {
+        List<CardEntity> all = new ArrayList<>();
+        Map<UUID, OffsetDateTime> dueAt = new HashMap<>();
+        for (Map.Entry<String, Long> e : intervalHours.entrySet()) {
+            for (CardEntity card : cardRepository.findDueCandidates(marketplaceId, e.getKey(),
+                    now.minusHours(e.getValue()), inflightThreshold, limit)) {
+                all.add(card);
+                OffsetDateTime measured = card.getLastMeasuredAt();
+                dueAt.put(card.getId(), measured == null ? OffsetDateTime.MIN : measured.plusHours(e.getValue()));
+            }
+        }
+        all.sort(Comparator.comparing(c -> dueAt.get(c.getId())));
+        return all.size() > limit ? all.subList(0, limit) : all;
+    }
+
+    /** Поставить задачи обхода и пометить карточки отправленными. Возвращает число задач. */
+    private int enqueue(List<CardEntity> cards, String marketplaceTitle, OffsetDateTime now) {
+        if (cards.isEmpty()) {
+            return 0;
+        }
+        List<UUID> ids = new ArrayList<>(cards.size());
+        for (CardEntity card : cards) {
             ParseTaskMessage task = new ParseTaskMessage();
             task.setTaskId(UUID.randomUUID());
             task.setCardId(card.getId());
             task.setSku(card.getSku());
             task.setGeo(geo);
-            task.setMarketplace(title);
-
+            task.setMarketplace(marketplaceTitle);
             parseTaskProducer.send(task);
-            enqueuedIds.add(card.getId());
+            ids.add(card.getId());
         }
+        cardRepository.markEnqueued(ids, now);
+        return ids.size();
+    }
 
-        cardRepository.markEnqueued(enqueuedIds, now);
-
-        log.info("Обход: долив очереди {} — было {}, добавлено {} (буфер {})",
-                queueKey, inQueue, enqueuedIds.size(), queueBuffer);
+    /** Сигнал резерва: при отставании — ключ со сроком жизни, иначе ключ удаляется. */
+    private void publishReserveSignal(String marketplaceTitle, boolean lagging) {
+        String key = keys.reserveSignal(marketplaceTitle, geo);
+        if (lagging) {
+            redis.opsForValue().set(key, "1", Duration.ofSeconds(signalTtlSeconds));
+        } else {
+            redis.delete(key);
+        }
     }
 }
