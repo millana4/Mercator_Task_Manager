@@ -124,7 +124,7 @@ taskmanager:
     # Размер ниши: target-count — сколько карточек нужно для анализа,
     # plan-count — сколько держать на парсинге (с запасом на выбывание).
     target-count: ${NICHE_TARGET_COUNT:30}
-    plan-count: ${NICHE_PLAN_COUNT:40}
+    plan-count: ${NICHE_PLAN_COUNT:34}
     # Автодобор: поиск новых кандидатов на дефицит × candidate-multiplier
     # (запас на отсев по близости и на непрошедшие проверку).
     candidate-multiplier: ${NICHE_CANDIDATE_MULTIPLIER:2}
