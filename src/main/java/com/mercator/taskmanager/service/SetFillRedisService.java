@@ -1,9 +1,11 @@
 package com.mercator.taskmanager.service;
 
+import com.mercator.taskmanager.clickhouse.SearchSnapshotRepository;
 import com.mercator.taskmanager.contract.Ozon.ExcludedCard;
 import com.mercator.taskmanager.entity.CardEntity;
 import com.mercator.taskmanager.entity.SetEntity;
 import com.mercator.taskmanager.entity.StratumEntity;
+import com.mercator.taskmanager.redis.PrioritySku;
 import com.mercator.taskmanager.redis.SelectTaskMessage;
 import com.mercator.taskmanager.redis.SelectTaskProducer;
 import com.mercator.taskmanager.repository.CardRepository;
@@ -28,6 +30,10 @@ import java.util.UUID;
  * (не ждёт ответа). Результаты придут асинхронно в SelectResultConsumer.
  * Открывает партию наполнения, чтобы отслеживать, когда все результаты
  * вернутся (или истечёт таймаут).
+ *
+ * В задачу кладётся список частых SKU выдачи страты (search_snapshot за
+ * search-priority-days суток, по убыванию частоты, без исключённых): парсер
+ * берёт их первыми. ClickHouse недоступен — список пустой, подбор как раньше.
  */
 @Service
 public class SetFillRedisService {
@@ -39,21 +45,29 @@ public class SetFillRedisService {
     private final SelectTaskProducer taskProducer;
     private final FillBatchRegistry batchRegistry;
     private final CardRepository cardRepository;
+    private final SearchSnapshotRepository searchSnapshotRepository;
 
     // Таймаут партии — настраиваемый, по умолчанию 4 часа.
     private final Duration batchTimeout;
+
+    // Окно частоты SKU в выдаче, суток.
+    private final int priorityDays;
 
     public SetFillRedisService(SetRepository setRepository,
                                StratumRepository stratumRepository,
                                SelectTaskProducer taskProducer,
                                FillBatchRegistry batchRegistry, CardRepository cardRepository,
-                               @Value("${taskmanager.fill.batch-timeout:PT4H}") Duration batchTimeout) {
+                               SearchSnapshotRepository searchSnapshotRepository,
+                               @Value("${taskmanager.fill.batch-timeout:PT4H}") Duration batchTimeout,
+                               @Value("${taskmanager.fill.search-priority-days:7}") int priorityDays) {
         this.setRepository = setRepository;
         this.stratumRepository = stratumRepository;
         this.taskProducer = taskProducer;
         this.batchRegistry = batchRegistry;
         this.cardRepository = cardRepository;
+        this.searchSnapshotRepository = searchSnapshotRepository;
         this.batchTimeout = batchTimeout;
+        this.priorityDays = priorityDays;
     }
 
     /**
@@ -91,7 +105,9 @@ public class SetFillRedisService {
             // exclude = уже собранные карточки сета и карточки ниш маркетплейса.
             // При первом наполнении карточек сета нет, при доборе — парсер
             // не повторит собранное.
-            task.setExclude(buildExclude(stratum.getId(), set.getMarketplace().getId()));
+            List<ExcludedCard> exclude = buildExclude(stratum.getId(), set.getMarketplace().getId());
+            task.setExclude(exclude);
+            task.setPrioritySkus(buildPrioritySkus(stratum.getId(), exclude));
 
             taskProducer.send(task);
             sent++;
@@ -136,13 +152,16 @@ public class SetFillRedisService {
                 task.setIsSeasonal(stratum.getIsSeasonal());
                 task.setBaseShare(stratum.getBaseShare() != null
                         ? stratum.getBaseShare().doubleValue() : null);
-                task.setExclude(buildExclude(stratum.getId(), set.getMarketplace().getId()));
+                List<ExcludedCard> exclude = buildExclude(stratum.getId(), set.getMarketplace().getId());
+                task.setExclude(exclude);
+                task.setPrioritySkus(buildPrioritySkus(stratum.getId(), exclude));
 
                 taskProducer.send(task);
                 sent++;
 
-                log.info("Добор страты {} ({}): недостаёт {} (active={}, need={})",
-                        stratum.getId(), stratum.getQuery(), deficit, active, stratum.getCount());
+                log.info("Добор страты {} ({}): недостаёт {} (active={}, need={}), частых в выдаче {}",
+                        stratum.getId(), stratum.getQuery(), deficit, active, stratum.getCount(),
+                        task.getPrioritySkus().size());
             }
         }
 
@@ -189,5 +208,29 @@ public class SetFillRedisService {
             }
         }
         return exclude;
+    }
+
+    // Частые SKU выдачи страты за окно, по убыванию частоты, без исключённых
+    // (парсер их всё равно отбросит). ClickHouse недоступен — пустой список.
+    private List<PrioritySku> buildPrioritySkus(UUID stratumId, List<ExcludedCard> exclude) {
+        List<PrioritySku> frequent;
+        try {
+            frequent = searchSnapshotRepository.findSkuFrequency(stratumId, priorityDays);
+        } catch (RuntimeException e) {
+            log.warn("Частота SKU в выдаче страты {} недоступна, подбор без приоритета: {}",
+                    stratumId, e.getMessage());
+            return List.of();
+        }
+        Set<String> excluded = new HashSet<>();
+        for (ExcludedCard ex : exclude) {
+            excluded.add(ex.getSku());
+        }
+        List<PrioritySku> result = new ArrayList<>();
+        for (PrioritySku p : frequent) {
+            if (!excluded.contains(p.sku())) {
+                result.add(p);
+            }
+        }
+        return result;
     }
 }

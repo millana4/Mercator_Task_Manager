@@ -35,7 +35,9 @@ public class SelectTaskProducer {
         String json = mapper.writeValueAsString(task);
         String key = keys.selectTasks(task.getMarketplace(), task.getGeo());
         redis.opsForList().leftPush(key, json);
-        log.info("Задача подбора отправлена в {}: task_id={}, stratum_id={}, query='{}', geo={}",
-                key, task.getTaskId(), task.getStratumId(), task.getQuery(), task.getGeo());
+        int priority = task.getPrioritySkus() != null ? task.getPrioritySkus().size() : 0;
+        log.info("Задача подбора отправлена в {}: task_id={}, stratum_id={}, query='{}', geo={}, "
+                        + "частых в выдаче={}",
+                key, task.getTaskId(), task.getStratumId(), task.getQuery(), task.getGeo(), priority);
     }
 }

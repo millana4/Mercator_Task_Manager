@@ -1,5 +1,6 @@
 package com.mercator.taskmanager.clickhouse;
 
+import com.mercator.taskmanager.redis.PrioritySku;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -10,12 +11,14 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
 /**
  * Запись снимков выдачи в ClickHouse. Все плитки одного результата - одним
  * INSERT (в ClickHouse каждая вставка создаёт часть, мелкие вставки вредны).
  * Массивы бейджей и меток подставляются литералами, как Map в CardSnapshotRepository.
+ * Чтение: частота SKU в выдаче страты для приоритета в задаче подбора.
  */
 @Repository
 public class SearchSnapshotRepository {
@@ -53,6 +56,20 @@ public class SearchSnapshotRepository {
             args.add(r.taskId());
         }
         clickhouse.update(sql.toString(), args.toArray());
+    }
+
+    /**
+     * Частота SKU в выдаче страты за последние days суток: в скольких прогонах
+     * (разных run_at) встретился SKU. По убыванию частоты, при равенстве — по sku.
+     * days — целое из конфигурации, подставляется литералом.
+     */
+    public List<PrioritySku> findSkuFrequency(UUID stratumId, int days) {
+        return clickhouse.query(
+                "SELECT sku, uniqExact(run_at) AS runs FROM search_snapshot "
+                        + "WHERE stratum_id = ? AND run_at > now() - INTERVAL " + days + " DAY "
+                        + "AND sku != '' GROUP BY sku ORDER BY runs DESC, sku",
+                (rs, rowNum) -> new PrioritySku(rs.getString("sku"), rs.getLong("runs")),
+                stratumId);
     }
 
     private static Timestamp ts(OffsetDateTime t) {

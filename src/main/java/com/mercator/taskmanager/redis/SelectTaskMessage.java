@@ -15,6 +15,10 @@ import java.util.UUID;
  * stratum_id — привязка: парсер вернёт его в результате, чтобы
  * таск-менеджер знал, к какой страте относятся карточки.
  * geo — регион (для замера).
+ * priority_skus — SKU, часто встречавшиеся в поисковой выдаче страты за окно
+ * (по убыванию частоты, без исключённых); парсер берёт их первыми среди
+ * прошедших первичный отсев на странице. null или пусто — приоритета нет
+ * (ниши поле не заполняют).
  * Остальное — параметры подбора (как в HTTP-контракте select).
  */
 @Data
@@ -31,4 +35,5 @@ public class SelectTaskMessage {
     private Boolean isSeasonal;
     private Double baseShare;
     private List<ExcludedCard> exclude;
+    private List<PrioritySku> prioritySkus;
 }
