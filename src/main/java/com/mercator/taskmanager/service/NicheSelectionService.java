@@ -182,6 +182,9 @@ public class NicheSelectionService {
     }
 
     // ---------- Автодобор: результат поиска ----------
+    // Новые кандидаты есть - счётчик поисков без новых сбрасывается, выбор на ближайшем тике.
+    // Новых нет - выдача исчерпана, счётчик растёт и удлиняет паузу до следующего поиска.
+    // Неудачный поиск (антибот, ошибка) счётчик не меняет: это не признак исчерпанной выдачи.
     private void handleRefillResult(NicheEntity niche, SelectResultMessage result) {
         niche.setSelectTaskId(null);
 
@@ -193,9 +196,17 @@ public class NicheSelectionService {
         }
 
         int[] added = saveNewCandidates(niche, result, "refill_search");
+        int total = added[0] + added[1];
+        if (total > 0) {
+            niche.setRefillEmptyCount(0);
+            niche.setRefillChoicePending(true);
+        } else {
+            niche.setRefillEmptyCount(niche.getRefillEmptyCount() + 1);
+        }
         log.info("Ниша id={}: автодобор — новых кандидатов {} (из выдачи {}, найдено парсером {}; "
-                        + "из страт {})",
-                niche.getId(), added[0] + added[1], added[0], result.getFoundCount(), added[1]);
+                        + "из страт {}), поисков подряд без новых {}",
+                niche.getId(), total, added[0], result.getFoundCount(), added[1],
+                niche.getRefillEmptyCount());
     }
 
     /**

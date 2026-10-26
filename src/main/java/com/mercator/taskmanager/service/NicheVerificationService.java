@@ -85,6 +85,7 @@ public class NicheVerificationService {
         if ("antibot_blocked".equals(result.getErrorCode())) {
             log.warn("Ниша id={}: проверка sku={} заблокирована антиботом (parser_id={}), "
                     + "место освобождено", niche.getId(), sku, result.getParserId());
+            markChoicePending(niche);
             return;
         }
 
@@ -95,6 +96,7 @@ public class NicheVerificationService {
             c.setStatus("unavailable");
             log.info("Ниша id={}: кандидат sku={} не прошёл проверку ({}), unavailable",
                     niche.getId(), sku, failure);
+            markChoicePending(niche);
             return;
         }
 
@@ -144,6 +146,17 @@ public class NicheVerificationService {
         cardRepository.addToNiche(niche.getId(), target.getId());
         c.setCard(target);
         c.setStatus("selected");
+    }
+
+    /**
+     * Место в нише освободилось (кандидат недоступен или проверка снята) - автодобор
+     * выберет следующего кандидата на ближайшем тике. Только у active-ниши: при
+     * первичном подборе выбор делает ранжирование.
+     */
+    private static void markChoicePending(NicheEntity niche) {
+        if (NicheStatus.ACTIVE.equals(niche.getStatus())) {
+            niche.setRefillChoicePending(true);
+        }
     }
 
     /** Причина непрохождения проверки или null, если кандидат пригоден. */

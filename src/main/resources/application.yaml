@@ -143,6 +143,9 @@ taskmanager:
     select-retry-delay-minutes: ${NICHE_SELECT_RETRY_DELAY_MINUTES:30}
     # Поиск новых кандидатов автодобора по нише — не чаще раза в N часов.
     refill-interval-hours: ${NICHE_REFILL_INTERVAL_HOURS:6}
+    # Поиск не принёс новых кандидатов (выдача исчерпана) - следующий через 24 ч, после второго
+    # такого подряд - через 72 ч; поиск с новыми кандидатами возвращает обычный интервал.
+    refill-empty-backoff-hours: ${NICHE_REFILL_EMPTY_BACKOFF_HOURS:24,72}
 yandex:
   ai:
     # Yandex AI Studio, OpenAI-совместимый Chat Completions API

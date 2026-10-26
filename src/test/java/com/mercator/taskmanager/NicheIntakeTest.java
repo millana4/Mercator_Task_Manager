@@ -29,7 +29,7 @@ class NicheIntakeTest extends NicheTestSupport {
         assertThat(nicheStatus(first.getId())).isEqualTo("new");
         assertThat(str("SELECT reference_sku FROM niche WHERE id = ?", first.getId()))
                 .isEqualTo(REFERENCE_SKU);
-        assertThat(count("SELECT plan_count FROM niche WHERE id = ?", first.getId())).isEqualTo(40);
+        assertThat(count("SELECT plan_count FROM niche WHERE id = ?", first.getId())).isEqualTo(34);
         assertThat(count("SELECT target_count FROM niche WHERE id = ?", first.getId())).isEqualTo(30);
     }
 

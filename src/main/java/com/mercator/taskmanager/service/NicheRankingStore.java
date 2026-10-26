@@ -132,6 +132,12 @@ public class NicheRankingStore {
         }
     }
 
+    /** Флаг автодобора «есть что выбирать»: ставится при новых кандидатах и освободившихся местах. */
+    @Transactional
+    public void setRefillChoicePending(UUID nicheId, boolean pending) {
+        nicheRepository.findById(nicheId).ifPresent(niche -> niche.setRefillChoicePending(pending));
+    }
+
     /** Ниша не может быть подобрана (например, нет референса). */
     @Transactional
     public void failNiche(UUID nicheId, String error) {

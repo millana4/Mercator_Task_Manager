@@ -102,6 +102,14 @@ public class NicheEntity {
     @Column(name = "refill_requested_at")
     private OffsetDateTime refillRequestedAt;
 
+    // поисков автодобора подряд без новых кандидатов: задаёт паузу до следующего поиска
+    @Column(name = "refill_empty_count", nullable = false)
+    private int refillEmptyCount;
+
+    // есть что выбирать (новые кандидаты, освободились места) - выбор на ближайшем тике
+    @Column(name = "refill_choice_pending", nullable = false)
+    private boolean refillChoicePending;
+
     @ManyToMany(fetch = FetchType.LAZY)
     @JoinTable(
             name = "niche_stratum_hint",
