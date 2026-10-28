@@ -162,15 +162,23 @@ abstract class NicheTestSupport extends PostgresTestBase {
 
     /** Активная карточка страты с полным набором content (sku и name — из него). */
     protected void addStratumCard(StratumEntity st, Map<String, Object> content) {
-        exec("INSERT INTO card (stratum_id, sku, name, content_txt) VALUES (?, ?, ?, ?::jsonb)",
-                st.getId(), String.valueOf(content.get("sku")), String.valueOf(content.get("name")),
+        UUID cardId = uuid("INSERT INTO card (marketplace_id, sku, name, content_txt) "
+                        + "VALUES (?, ?, ?, ?::jsonb) RETURNING id",
+                ozonId(), String.valueOf(content.get("sku")), String.valueOf(content.get("name")),
                 MAPPER.writeValueAsString(content));
+        exec("INSERT INTO stratum_card (stratum_id, card_id) VALUES (?, ?)", st.getId(), cardId);
     }
 
     /** Активная карточка страты без полного набора (content_txt пуст). */
     protected void addStratumCardWithoutContent(StratumEntity st, int score) {
-        exec("INSERT INTO card (stratum_id, sku, name) VALUES (?, ?, ?)",
-                st.getId(), stratumSku(score), "Худи страты #" + score);
+        UUID cardId = uuid("INSERT INTO card (marketplace_id, sku, name) VALUES (?, ?, ?) RETURNING id",
+                ozonId(), stratumSku(score), "Худи страты #" + score);
+        exec("INSERT INTO stratum_card (stratum_id, card_id) VALUES (?, ?)", st.getId(), cardId);
+    }
+
+    /** id маркетплейса ozon — у карточки товара он обязателен (V19). */
+    protected short ozonId() {
+        return references.marketplace("ozon").getId();
     }
 
     /** Ниша через сервис; размер ниши: target 2, plan — planCount. */

@@ -81,7 +81,7 @@ class SetFillServiceLiveTest {
             assertTrue(totalCards > 0, "Ожидали хотя бы одну карточку");
 
             // 3. Проверяем Postgres: карточки привязаны к нашей страте.
-            List<CardEntity> cards = cardRepository.findByStratumId(savedStratum.getId());
+            List<CardEntity> cards = cardRepository.findStratumMembers(savedStratum.getId());
             assertFalse(cards.isEmpty(), "В Postgres нет карточек страты");
             System.out.println(">>> Карточек в Postgres: " + cards.size());
 
@@ -96,8 +96,10 @@ class SetFillServiceLiveTest {
             }
 
         } finally {
-            // 5. Убираем за собой сет (подкатегории, страты и карточки удалятся каскадом).
+            // 5. Убираем за собой карточки страты и сет (подкатегории, страты и членство
+            // удалятся каскадом; карточка — товар, каскадом от сета не удаляется).
             // Замеры/снимки в ClickHouse останутся — они append-only, это норма для теста.
+            cardRepository.deleteAll(cardRepository.findStratumMembers(savedStratum.getId()));
             setRepository.deleteById(savedSet.getId());
         }
     }

@@ -67,18 +67,24 @@ class NicheIntakeTest extends NicheTestSupport {
         NicheRef b = createNiche(true, 3);
 
         // карточка, созданная для A и входящая в A и B
-        UUID shared = uuid("INSERT INTO card (niche_id, sku, name) VALUES (?, ?, 'shared') RETURNING id",
-                a.id(), prefix + "SH");
+        UUID shared = uuid("INSERT INTO card (marketplace_id, niche_id, sku, name) "
+                + "VALUES (?, ?, ?, 'shared') RETURNING id", ozonId(), a.id(), prefix + "SH");
         exec("INSERT INTO niche_card (niche_id, card_id) VALUES (?, ?), (?, ?)",
                 a.id(), shared, b.id(), shared);
         // карточка только A
-        UUID own = uuid("INSERT INTO card (niche_id, sku, name) VALUES (?, ?, 'own') RETURNING id",
-                a.id(), prefix + "OWN");
+        UUID own = uuid("INSERT INTO card (marketplace_id, niche_id, sku, name) "
+                + "VALUES (?, ?, ?, 'own') RETURNING id", ozonId(), a.id(), prefix + "OWN");
         exec("INSERT INTO niche_card (niche_id, card_id) VALUES (?, ?)", a.id(), own);
         // карточка страты в составе A
-        UUID stratumCard = uuid("INSERT INTO card (stratum_id, sku, name) VALUES (?, ?, 'st') RETURNING id",
-                st.getId(), prefix + "ST");
+        UUID stratumCard = uuid("INSERT INTO card (marketplace_id, sku, name) VALUES (?, ?, 'st') RETURNING id",
+                ozonId(), prefix + "ST");
+        exec("INSERT INTO stratum_card (stratum_id, card_id) VALUES (?, ?)", st.getId(), stratumCard);
         exec("INSERT INTO niche_card (niche_id, card_id) VALUES (?, ?)", a.id(), stratumCard);
+        // карточка, созданная для A и состоящая в страте живого сета, — тоже не выбывает
+        UUID ownInSet = uuid("INSERT INTO card (marketplace_id, niche_id, sku, name) "
+                + "VALUES (?, ?, ?, 'own-set') RETURNING id", ozonId(), a.id(), prefix + "OWNSET");
+        exec("INSERT INTO stratum_card (stratum_id, card_id) VALUES (?, ?)", st.getId(), ownInSet);
+        exec("INSERT INTO niche_card (niche_id, card_id) VALUES (?, ?)", a.id(), ownInSet);
 
         assertThat(nicheService.delete(a.externalId())).isTrue();
 
@@ -92,7 +98,10 @@ class NicheIntakeTest extends NicheTestSupport {
         assertThat(cardStatus(prefix + "OWN")).isEqualTo("dropped");
         // карточка страты осталась в страте
         assertThat(cardStatus(prefix + "ST")).isEqualTo("active");
-        assertThat(uuid("SELECT stratum_id FROM card WHERE id = ?", stratumCard)).isEqualTo(st.getId());
+        assertThat(uuid("SELECT stratum_id FROM stratum_card WHERE card_id = ?", stratumCard))
+                .isEqualTo(st.getId());
+        // карточка ниши, состоящая в страте живого сета, в обходе остаётся
+        assertThat(cardStatus(prefix + "OWNSET")).isEqualTo("active");
     }
 
     @Test

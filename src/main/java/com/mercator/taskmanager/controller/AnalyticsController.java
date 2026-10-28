@@ -15,7 +15,8 @@ import java.util.UUID;
  *
  * GET /api/v1/analytics/cards/{cardId}/measurements — временной ряд
  *     замеров карточки (цены, наличие, рейтинг во времени).
- * GET /api/v1/analytics/strata/{stratumId}/cards — карточки страты.
+ * GET /api/v1/analytics/strata/{stratumId}/cards — карточки страты
+ *     (все, когда-либо входившие, и выбывшие тоже).
  */
 @RestController
 @RequestMapping("/api/v1/analytics")
@@ -39,6 +40,6 @@ public class AnalyticsController {
     /** Карточки страты (их id, sku, статус) — чтобы аналитика знала, что запрашивать. */
     @GetMapping("/strata/{stratumId}/cards")
     public ResponseEntity<List<CardEntity>> cardsOfStratum(@PathVariable UUID stratumId) {
-        return ResponseEntity.ok(cardRepository.findByStratumId(stratumId));
+        return ResponseEntity.ok(cardRepository.findStratumMembers(stratumId));
     }
 }

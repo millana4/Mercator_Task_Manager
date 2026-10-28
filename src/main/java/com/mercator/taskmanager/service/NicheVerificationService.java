@@ -23,10 +23,10 @@ import java.util.UUID;
  * или подставленный размер модели (analog_sku).
  *
  * Проверяется sku: analog_sku, если подставлен размер, иначе sku карточки кандидата.
- * В наличии и есть цена — кандидат входит в нишу: выбывшая карточка ниши
- * возвращается в обход (замер + снимок, markInStock), выбывшая карточка страты
- * не возвращается (её жизненный цикл решает категория) — создаётся своя,
- * карточки нет — создаётся новая. Иначе — unavailable.
+ * В наличии и есть цена — кандидат входит в нишу: выбывшая карточка возвращается
+ * в обход (замер + снимок, markInStock) как член ниши — в страты не возвращается
+ * (членство закрыто при выбытии, страту добрали заменой); карточки нет — создаётся
+ * новая. Карточка товара на маркетплейсе одна (V19). Иначе — unavailable.
  * Антибот — проверка снимается, кандидат снова участвует в выборе.
  *
  * Проверка подставленного размера может вернуться ещё во время первичного подбора,
@@ -105,23 +105,11 @@ public class NicheVerificationService {
         String parserId = result.getParserId() != null ? result.getParserId() : "";
         Short marketplaceId = niche.getMarketplace().getId();
 
-        // подставленный размер — своя карточка размера, иначе карточка кандидата
+        // подставленный размер — карточка размера, иначе карточка кандидата;
+        // карточка товара на маркетплейсе одна (sku уникален)
         CardEntity target = !substituted && c.getCard() != null
                 ? c.getCard()
                 : cardRepository.findBySkuAndMarketplace(sku, marketplaceId).orElse(null);
-        // карточка-кандидат, а на маркетплейсе уже есть активная с этим sku — берём активную
-        if (target != null && "candidate".equals(target.getStatus())) {
-            CardEntity active = cardRepository.findBySkuAndMarketplace(sku, marketplaceId)
-                    .filter(found -> "active".equals(found.getStatus()))
-                    .orElse(null);
-            if (active != null) {
-                target = active;
-            }
-        }
-        // выбывшую карточку страты не возвращаем: её жизненный цикл решает категория
-        if (target != null && target.getStratum() != null && !"active".equals(target.getStatus())) {
-            target = null;
-        }
 
         if (target == null) {
             // новая карточка: content_txt пишется при создании

@@ -107,16 +107,20 @@ class NicheVerificationServiceTest {
     }
 
     @Test
-    void activeCardPreferredOverCandidateCard() {
-        CardEntity candidateCard = card("candidate");
-        CardEntity activeCard = card("active");
-        givenCandidate(candidateCard);
-        when(cardRepository.findBySkuAndMarketplace(any(), any())).thenReturn(Optional.of(activeCard));
+    void droppedCardOfSubstitutedSizeReturnsAsSameCard() {
+        // карточка товара одна (V19): выбывшая карточка размера возвращается в обход
+        // как член ниши, новая не создаётся (в страты её не вернуть — членство закрыто)
+        CardEntity dropped = card("dropped");
+        NicheCandidateEntity candidate = givenCandidate(card("active"));
+        candidate.setAnalogSku("4569427099");
+        when(cardRepository.findBySkuAndMarketplace(eq("4569427099"), any())).thenReturn(Optional.of(dropped));
 
         service.handleResult(result(passedCard()));
 
-        verify(lifecycle, never()).markInStock(any());
-        verify(cardRepository).addToNiche(niche.getId(), activeCard.getId());
+        verify(lifecycle).markInStock(dropped.getId());
+        verify(cardWriteService, never()).saveNicheCard(any(), any(), any(), any());
+        verify(cardRepository).addToNiche(niche.getId(), dropped.getId());
+        assertEquals("selected", candidate.getStatus());
     }
 
     // ---------- Вспомогательное ----------

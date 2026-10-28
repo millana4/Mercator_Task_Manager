@@ -120,6 +120,16 @@ taskmanager:
     # Задачи прогона раскладываются на окно (мин) и уходят в search:tasks по одной-две,
     # вперемешку с обходом. 0 — все задачи сразу, как ручной запуск.
     spread-minutes: ${SEARCH_SNAPSHOT_SPREAD_MINUTES:240}
+  season:
+    # Сбор нового сезонного сета (статус collecting): не больше одной задачи подбора
+    # за select-interval-minutes, пока обход не отстаёт; повтор страты с дефицитом —
+    # не раньше select-retry-hours после прошлой задачи.
+    enabled: ${SEASON_ENABLED:true}
+    select-interval-minutes: ${SEASON_SELECT_INTERVAL_MINUTES:30}
+    select-retry-hours: ${SEASON_SELECT_RETRY_HOURS:24}
+    tick-ms: ${SEASON_TICK_MS:60000}
+    # Проверка готовности сетов в сборе и переключение (МСК): через 30 мин после батча аналитики.
+    switch-cron: ${SEASON_SWITCH_CRON:0 15 1,13 * * *}
   niche:
     # Размер ниши: target-count — сколько карточек нужно для анализа,
     # plan-count — сколько держать на парсинге (с запасом на выбывание).
@@ -156,6 +166,12 @@ yandex:
     temperature: ${YANDEX_TEMPERATURE:0.2}
     max-tokens: ${YANDEX_MAX_TOKENS:500}
     timeout-seconds: ${YANDEX_TIMEOUT_SECONDS:60}
+analytics:
+  # Сервис аналитики (контейнер an-app в сети ядра): готовность сета для переключения
+  # сезона. Ключ — тот же межсервисный PARSER_API_KEY (= SERVICE_API_KEY аналитики).
+  url: ${ANALYTICS_URL:http://an-app:8020}
+  api-key: ${PARSER_API_KEY:}
+  timeout-seconds: ${ANALYTICS_TIMEOUT_SECONDS:30}
 embedder:
   # Сервис эмбеддингов (mercator_embedder), контейнер emb-app в сети ядра.
   # Ключ — тот же межсервисный PARSER_API_KEY.

@@ -1,5 +1,6 @@
 package com.mercator.taskmanager;
 
+import com.mercator.taskmanager.assignment.SetStatus;
 import com.mercator.taskmanager.entity.CardEntity;
 import com.mercator.taskmanager.entity.SetEntity;
 import com.mercator.taskmanager.entity.StratumEntity;
@@ -25,6 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 /**
  * Запросы планового и учащённого обхода на настоящем Postgres:
  * просроченные по категории, счётчики активных и просроченных, кандидаты учащения.
+ * Карточка в работе — активна и состоит в страте живого сета (членство открыто) или в нише.
  */
 @SpringBootTest
 @ActiveProfiles("test")
@@ -39,10 +41,15 @@ class CrawlQueriesIntegrationTest extends PostgresTestBase {
     private final OffsetDateTime now = OffsetDateTime.now().truncatedTo(ChronoUnit.SECONDS);
 
     private StratumEntity stratum(String category, String query) {
+        return stratum(category, query, SetStatus.ACTIVE);
+    }
+
+    private StratumEntity stratum(String category, String query, String setStatus) {
         SetEntity set = new SetEntity();
         set.setMarketplace(references.marketplace("ozon"));
         set.setCategory(references.category(category));
         set.setGeo(references.geo("Санкт-Петербург"));
+        set.setStatus(setStatus);
         SetEntity savedSet = setRepository.save(set);
 
         SubcategoryEntity subcategory = new SubcategoryEntity();
@@ -64,7 +71,7 @@ class CrawlQueriesIntegrationTest extends PostgresTestBase {
                             OffsetDateTime measuredAt, OffsetDateTime enqueuedAt,
                             OffsetDateTime boostStartedAt) {
         CardEntity card = new CardEntity();
-        card.setStratum(stratum);
+        card.setMarketplaceId(stratum.getSubcategory().getSet().getMarketplace().getId());
         card.setSku(sku);
         card.setStatus(status);
         card.setFailedAttempts(0);
@@ -72,7 +79,9 @@ class CrawlQueriesIntegrationTest extends PostgresTestBase {
         card.setLastEnqueuedAt(enqueuedAt);
         card.setBoostStartedAt(boostStartedAt);
         card.setBoostBasePrice(boostStartedAt == null ? null : 1000.0);
-        return cardRepository.saveAndFlush(card);
+        CardEntity saved = cardRepository.saveAndFlush(card);
+        cardRepository.addToStratum(stratum.getId(), saved.getId(), now);
+        return saved;
     }
 
     private static List<String> skus(List<CardEntity> cards) {
@@ -112,5 +121,32 @@ class CrawlQueriesIntegrationTest extends PostgresTestBase {
         assertEquals(List.of("B"),
                 skus(cardRepository.findBoostCandidates(mp, now.minusMinutes(60), inflight, 10)));
         assertEquals(2, cardRepository.countBoosted());
+    }
+
+    @Test
+    @Transactional
+    void inWorkByMembershipOfLiveSets() {
+        Short mp = references.marketplace("ozon").getId();
+        long kidsBefore = cardRepository.countActiveInCategory(mp, "kids_clothing");
+        long adultBefore = cardRepository.countActiveInCategory(mp, "clothing");
+
+        StratumEntity live = stratum("kids_clothing", "Куртка для девочки");
+        StratumEntity collecting = stratum("kids_clothing", "Пуховик для девочки", SetStatus.COLLECTING);
+        StratumEntity retired = stratum("kids_clothing", "Шорты для девочки", SetStatus.RETIRED);
+        StratumEntity adult = stratum("clothing", "Куртка женская");
+
+        card(live, "M-live", "active", null, null, null);                 // в работе
+        card(collecting, "M-coll", "active", null, null, null);           // сет в сборе — в работе
+        card(retired, "M-ret", "active", null, null, null);               // выведенный сет — нет
+        CardEntity closed = card(live, "M-closed", "active", null, null, null);
+        cardRepository.closeStratumMemberships(closed.getId(), now);       // членство закрыто — нет
+        CardEntity both = card(live, "M-both", "active", null, null, null);
+        cardRepository.addToStratum(adult.getId(), both.getId(), now);     // товар в двух категориях
+
+        assertEquals(kidsBefore + 3, cardRepository.countActiveInCategory(mp, "kids_clothing"));
+        assertEquals(adultBefore + 1, cardRepository.countActiveInCategory(mp, "clothing"));
+        assertEquals(1, cardRepository.countActiveStratumMembers(live.getId()) - 1);   // M-live и M-both
+        assertEquals(0, cardRepository.countLiveStrata(closed.getId()));
+        assertEquals(2, cardRepository.countLiveStrata(both.getId()));
     }
 }

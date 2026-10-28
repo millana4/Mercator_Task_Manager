@@ -448,16 +448,16 @@ public class NicheRankingStore {
     }
 
     /**
-     * Карточка выпала из выборки ниши: убрать из состава. Карточка без страты,
-     * больше не входящая ни в одну нишу, становится кандидатом (из обхода уходит,
-     * в базе остаётся).
+     * Карточка выпала из выборки ниши: убрать из состава. Карточка, которая не состоит
+     * в страте живого сета и больше не входит ни в одну нишу, становится кандидатом
+     * (из обхода уходит, в базе остаётся).
      */
     private void detach(NicheEntity niche, CardEntity card) {
         if (card == null) {
             return;
         }
         cardRepository.removeFromNiche(niche.getId(), card.getId());
-        if (card.getStratum() == null
+        if (cardRepository.countLiveStrata(card.getId()) == 0
                 && cardRepository.countNiches(card.getId()) == 0
                 && !"dropped".equals(card.getStatus())
                 && !"candidate".equals(card.getStatus())) {

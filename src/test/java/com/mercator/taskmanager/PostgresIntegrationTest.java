@@ -16,16 +16,18 @@ import org.springframework.test.context.ActiveProfiles;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.time.OffsetDateTime;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Сквозной тест Postgres: сохраняем цепочку сет → подкатегория → страта →
- * карточка и читаем обратно, проверяя, что связи сохранились.
+ * Сквозной тест Postgres: сохраняем цепочку сет → подкатегория → страта и карточку
+ * с членством в страте (stratum_card), читаем обратно и проверяем связи.
  */
 @SpringBootTest
 @ActiveProfiles("test")
@@ -45,7 +47,6 @@ class PostgresIntegrationTest extends PostgresTestBase {
         set.setMarketplace(references.marketplace("ozon"));
         set.setCategory(references.category("clothing"));
         set.setGeo(references.geo("Санкт-Петербург"));
-        // id и created_at проставит база (DEFAULT), поэтому их не задаём
         SetEntity savedSet = setRepository.save(set);
         assertNotNull(savedSet.getId(), "У сохранённого сета должен появиться id");
 
@@ -72,29 +73,28 @@ class PostgresIntegrationTest extends PostgresTestBase {
         StratumEntity savedStratum = stratumRepository.save(stratum);
         assertNotNull(savedStratum.getId());
 
-        // 4. Карточка под этой стратой
+        // 4. Карточка товара и её членство в страте
         CardEntity card = new CardEntity();
-        card.setStratum(savedStratum);
+        card.setMarketplaceId(savedSet.getMarketplace().getId());
         card.setSku("3974473087");
         card.setName("Рубашка в полоску");
         card.setSellerId("3463754");
         card.setCollection("base");
         card.setStatus("active");
         card.setFailedAttempts(0);
-        cardRepository.save(card);
+        CardEntity savedCard = cardRepository.saveAndFlush(card);
+        cardRepository.addToStratum(savedStratum.getId(), savedCard.getId(), OffsetDateTime.now());
 
-        // 5. Читаем обратно и проверяем связи по всей цепочке
-        List<CardEntity> cards = cardRepository.findByStratumId(savedStratum.getId());
-        assertEquals(1, cards.size());
+        // 5. Читаем обратно: члены страты, товар в сете, цепочка страта → подкатегория → сет
+        List<CardEntity> members = cardRepository.findStratumMembers(savedStratum.getId());
+        assertEquals(1, members.size());
+        assertEquals("3974473087", members.get(0).getSku());
+        assertEquals(1, cardRepository.countActiveStratumMembers(savedStratum.getId()));
+        assertTrue(cardRepository.isInSet(savedSet.getId(), savedCard.getId()));
 
-        CardEntity read = cards.get(0);
-        assertEquals("3974473087", read.getSku());
-        assertEquals("Рубашка", read.getStratum().getItem());                    // карточка → страта
-        assertEquals("Блузы и рубашки",
-                read.getStratum().getSubcategory().getTitle());                   // страта → подкатегория
-        assertEquals("f",
-                read.getStratum().getSubcategory().getAttrs().get("segment"));    // атрибуты подкатегории
-        assertEquals("Санкт-Петербург",
-                read.getStratum().getSubcategory().getSet().getGeo().getTitle()); // подкатегория → сет
+        StratumEntity read = stratumRepository.findById(savedStratum.getId()).orElseThrow();
+        assertEquals("Блузы и рубашки", read.getSubcategory().getTitle());
+        assertEquals("f", read.getSubcategory().getAttrs().get("segment"));
+        assertEquals("Санкт-Петербург", read.getSubcategory().getSet().getGeo().getTitle());
     }
 }

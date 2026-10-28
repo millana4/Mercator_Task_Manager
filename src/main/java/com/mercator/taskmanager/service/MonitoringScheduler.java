@@ -25,6 +25,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Плановый обход карточек через Redis-очередь parse:tasks:<маркетплейс>:<гео>.
@@ -82,10 +83,11 @@ public class MonitoringScheduler {
     static final class MarketplaceState {
         double tokens;
         OffsetDateTime lastTick;
-        boolean lagging;
+        volatile boolean lagging;
     }
 
-    private final Map<Short, MarketplaceState> states = new HashMap<>();
+    // Читается и очередью сбора сезонного сета (isLagging) — потокобезопасная карта.
+    private final Map<Short, MarketplaceState> states = new ConcurrentHashMap<>();
 
     public MonitoringScheduler(CardRepository cardRepository,
                                MarketplaceRepository marketplaceRepository,
@@ -146,6 +148,12 @@ public class MonitoringScheduler {
             out.put(p.substring(0, eq).trim(), hours);
         }
         return out;
+    }
+
+    /** Отстаёт ли сейчас обход маркетплейса (до первого тика — нет). */
+    public boolean isLagging(Short marketplaceId) {
+        MarketplaceState state = states.get(marketplaceId);
+        return state != null && state.lagging;
     }
 
     /** Новое значение отставания с порогами включения и снятия (гистерезис). */

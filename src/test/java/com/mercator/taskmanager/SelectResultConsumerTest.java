@@ -26,7 +26,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /**
  * Тест приёмной логики подбора. Транспорт больше не нужен: вызываем
  * SelectResultConsumer.handle(json) напрямую и проверяем, что карточка
- * записалась в Postgres. Живой Postgres (Testcontainers).
+ * и её членство в страте записались в Postgres. Живой Postgres (Testcontainers).
  */
 @Tag("integration")
 @ActiveProfiles("test")
@@ -100,12 +100,13 @@ class SelectResultConsumerTest extends PostgresTestBase {
         // Прямой вызов логики — без брокера.
         consumer.handle(resultJson);
 
-        List<CardEntity> cards = cardRepository.findByStratumId(savedStratum.getId());
+        List<CardEntity> cards = cardRepository.findStratumMembers(savedStratum.getId());
         assertFalse(cards.isEmpty(), "Консьюмер должен был записать карточку");
         assertEquals(uniqueSku, cards.get(0).getSku());
         assertEquals("Рубашка тестовая", cards.get(0).getName());
+        assertEquals(savedSet.getMarketplace().getId(), cards.get(0).getMarketplaceId());
 
-        // Уборка.
+        // Уборка: удаление карточки убирает и членство (каскад).
         cardRepository.deleteAll(cards);
         stratumRepository.deleteById(savedStratum.getId());
         subcategoryRepository.deleteById(savedSubcategory.getId());

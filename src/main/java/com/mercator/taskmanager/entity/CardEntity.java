@@ -20,24 +20,25 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Сущность карточки — SKU, подобранный парсером под страту или для ниши.
- * name — последнее известное имя (снимок).
- * seller_id и collection нужны для формирования exclude при доборе.
- * Блок жизненного цикла: status (active | stale | dropped | candidate),
- * failedAttempts, отметки времени. candidate — кандидат ниши, в обход
- * и аналитику не попадает.
+ * Сущность карточки — товар маркетплейса: один sku — одна карточка, один card_id
+ * (уникальность marketplace_id + sku, V19). История замеров — под этим card_id.
  *
- *  last_price — цена (price) последнего замера с ценой. boost_base_price и
- *  boost_started_at — учащённый обход после резкого скачка цены: цена до скачка
- *  и начало учащения; boost_started_at = null — учащения нет.
+ * Состав: страты — таблица stratum_card (товар может входить в страты разных сетов
+ * и категорий; закрытое членство — карточка выбыла из страты), ниши — niche_card.
+ * niche — ниша, для которой карточка создана (необязательно).
+ *
+ * status — доступность товара: active | stale | dropped | candidate. candidate —
+ * кандидат ниши, в обход и аналитику не попадает. В обходе карточка, если она active
+ * и состоит в страте живого сета (active / collecting) или в нише.
+ * name — последнее известное имя (снимок). seller_id и collection — для exclude.
+ *
+ * last_price — цена (price) последнего замера с ценой. boost_base_price и
+ * boost_started_at — учащённый обход после резкого скачка цены: цена до скачка
+ * и начало учащения; boost_started_at = null — учащения нет.
  *
  * content_txt — карточка от парсера целиком при полном разборе (все
  * характеристики, описание, все переключатели вариантов); null — полного
  * разбора ещё не было. tnved — код ТН ВЭД, когда Ozon его показывает.
- *
- * Связи: заполнено ровно одно — страта или ниша, для которой карточка создана
- * (ограничения card_stratum_or_niche_check и card_niche_owner_check в базе).
- * Состав ниш — таблица niche_card: карточка может входить в несколько ниш.
  */
 @Entity
 @Table(name = "card")
@@ -51,9 +52,8 @@ public class CardEntity {
     @Column(nullable = false, updatable = false)
     private UUID id;
 
-    @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "stratum_id")
-    private StratumEntity stratum;
+    @Column(name = "marketplace_id", nullable = false)
+    private Short marketplaceId;
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "niche_id")

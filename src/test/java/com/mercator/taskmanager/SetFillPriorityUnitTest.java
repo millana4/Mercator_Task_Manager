@@ -1,5 +1,6 @@
 package com.mercator.taskmanager;
 
+import com.mercator.taskmanager.assignment.SetStatus;
 import com.mercator.taskmanager.clickhouse.SearchSnapshotRepository;
 import com.mercator.taskmanager.contract.Ozon.ExcludedCard;
 import com.mercator.taskmanager.entity.CardEntity;
@@ -30,7 +31,11 @@ import java.util.Optional;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -47,6 +52,8 @@ class SetFillPriorityUnitTest {
     private final UUID setId = UUID.randomUUID();
     private final UUID stratumId = UUID.randomUUID();
 
+    private SetEntity set;
+    private StratumEntity stratum;
     private SetFillRedisService service;
 
     @BeforeEach
@@ -59,7 +66,7 @@ class SetFillPriorityUnitTest {
         CategoryEntity category = mock(CategoryEntity.class);
         when(category.getTitle()).thenReturn("kids_clothing");
 
-        SetEntity set = mock(SetEntity.class);
+        set = mock(SetEntity.class);
         when(set.getId()).thenReturn(setId);
         when(set.getGeo()).thenReturn(geo);
         when(set.getMarketplace()).thenReturn(marketplace);
@@ -68,7 +75,7 @@ class SetFillPriorityUnitTest {
         SubcategoryEntity subcategory = mock(SubcategoryEntity.class);
         when(subcategory.getSet()).thenReturn(set);
 
-        StratumEntity stratum = mock(StratumEntity.class);
+        stratum = mock(StratumEntity.class);
         when(stratum.getId()).thenReturn(stratumId);
         when(stratum.getSubcategory()).thenReturn(subcategory);
         when(stratum.getQuery()).thenReturn("Блузка для девочки");
@@ -78,11 +85,11 @@ class SetFillPriorityUnitTest {
         CardEntity taken = mock(CardEntity.class);
         when(taken.getSku()).thenReturn("A");
 
-        when(setRepository.findAll()).thenReturn(List.of(set));
+        when(setRepository.findByStatus(SetStatus.ACTIVE)).thenReturn(List.of(set));
         when(setRepository.findById(setId)).thenReturn(Optional.of(set));
         when(stratumRepository.findBySubcategorySetId(setId)).thenReturn(List.of(stratum));
         when(stratumRepository.findById(stratumId)).thenReturn(Optional.of(stratum));
-        when(cardRepository.findByStratumId(stratumId)).thenReturn(List.of(taken));
+        when(cardRepository.findStratumMembers(stratumId)).thenReturn(List.of(taken));
 
         service = new SetFillRedisService(setRepository, stratumRepository, producer,
                 batchRegistry, cardRepository, snapshots, Duration.ofHours(4), 7);
@@ -108,6 +115,43 @@ class SetFillPriorityUnitTest {
         assertThat(service.startFill(setId)).isEqualTo(1);
 
         assertThat(sentTask().getPrioritySkus()).containsExactly(new PrioritySku("B", 3));
+    }
+
+    @Test
+    void startFillRefusesCollectingSet() {
+        when(set.getStatus()).thenReturn(SetStatus.COLLECTING);
+
+        assertThatThrownBy(() -> service.startFill(setId)).isInstanceOf(IllegalArgumentException.class);
+        verify(producer, never()).send(any());
+    }
+
+    @Test
+    void collectingTaskTakesPriorityFromActiveStratumWithSameQuery() {
+        UUID activeStratumId = UUID.randomUUID();
+        StratumEntity activeStratum = mock(StratumEntity.class);
+        when(activeStratum.getId()).thenReturn(activeStratumId);
+        when(stratumRepository.findActiveByQuery(any(), any(), any(), eq("Блузка для девочки")))
+                .thenReturn(List.of(activeStratum));
+        when(snapshots.findSkuFrequency(activeStratumId, 7)).thenReturn(List.of(
+                new PrioritySku("B", 5), new PrioritySku("A", 3)));
+
+        service.sendCollectingTask(stratum, 2);
+
+        SelectTaskMessage task = sentTask();
+        assertThat(task.getStratumId()).isEqualTo(stratumId);
+        assertThat(task.getCount()).isEqualTo(2);
+        assertThat(task.getPrioritySkus()).containsExactly(new PrioritySku("B", 5));   // A — в exclude
+        verify(snapshots, never()).findSkuFrequency(eq(stratumId), eq(7));
+    }
+
+    @Test
+    void collectingTaskWithoutActiveCounterpartUsesOwnStratum() {
+        when(stratumRepository.findActiveByQuery(any(), any(), any(), any())).thenReturn(List.of());
+        when(snapshots.findSkuFrequency(stratumId, 7)).thenReturn(List.of(new PrioritySku("C", 1)));
+
+        service.sendCollectingTask(stratum, 3);
+
+        assertThat(sentTask().getPrioritySkus()).containsExactly(new PrioritySku("C", 1));
     }
 
     @Test

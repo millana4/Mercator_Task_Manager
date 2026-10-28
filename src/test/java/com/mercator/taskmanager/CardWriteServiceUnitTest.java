@@ -16,6 +16,7 @@ import org.mockito.ArgumentCaptor;
 
 import java.time.OffsetDateTime;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -29,6 +30,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -38,9 +40,15 @@ import static org.mockito.Mockito.when;
  *  - первый замер новой карточки отмечается в last_measured_at тем же временем,
  *    что parsed_at замера, — иначе обход сразу отправит карточку на повторный парсинг;
  *  - при полном разборе (full_content) карточка целиком пишется в content_txt
- *    с ключами в snake_case, время разбора — в content_txt_parsed_at, ТН ВЭД — в tnved.
+ *    с ключами в snake_case, время разбора — в content_txt_parsed_at, ТН ВЭД — в tnved;
+ *  - карточка — товар (V19): известный sku получает членство в страте без новой
+ *    карточки, товар уже в сете не записывается.
  */
 class CardWriteServiceUnitTest {
+
+    private static final UUID STRATUM_ID = UUID.randomUUID();
+    private static final UUID SET_ID = UUID.randomUUID();
+    private static final short MARKETPLACE_ID = 1;
 
     private CardRepository cardRepository;
     private MeasurementRepository measurementRepository;
@@ -54,6 +62,7 @@ class CardWriteServiceUnitTest {
                 mock(CardSnapshotRepository.class), new JsonHelper());
         // save возвращает ту же сущность, как это делает JPA для новой записи
         when(cardRepository.save(any(CardEntity.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(cardRepository.findMarketplaceIdOfStratum(STRATUM_ID)).thenReturn(MARKETPLACE_ID);
     }
 
     // ---------- last_measured_at ----------
@@ -67,7 +76,7 @@ class CardWriteServiceUnitTest {
 
     @Test
     void nicheCardGetsLastMeasuredAtEqualToFirstMeasurement() {
-        service.saveNicheCard(mock(NicheEntity.class), "Санкт-Петербург", mock(OzonCard.class), "1");
+        service.saveNicheCard(niche(), "Санкт-Петербург", mock(OzonCard.class), "1");
 
         assertFirstMeasurementMarked();
     }
@@ -79,6 +88,57 @@ class CardWriteServiceUnitTest {
 
         verify(measurementRepository).insert(any(Measurement.class));
         verifyNoInteractions(cardRepository);
+    }
+
+    // ---------- Товар и членство в страте (V19) ----------
+
+    @Test
+    void newSkuGetsCardWithMarketplaceAndMembership() {
+        assertTrue(service.saveCard(stratum(), "Санкт-Петербург", fullCard("6109100000"), "1"));
+
+        CardEntity saved = savedCard();
+        assertEquals(MARKETPLACE_ID, saved.getMarketplaceId());
+        verify(cardRepository).addToStratum(eq(STRATUM_ID), any(), any());
+    }
+
+    @Test
+    void knownSkuJoinsStratumAndReturnsToSale() {
+        CardEntity known = new CardEntity();
+        known.setId(UUID.randomUUID());
+        known.setSku("4569427009");
+        known.setStatus("dropped");
+        known.setFailedAttempts(5);
+        known.setDroppedAt(OffsetDateTime.now().minusDays(3));
+        when(cardRepository.findBySkuAndMarketplace("4569427009", MARKETPLACE_ID))
+                .thenReturn(Optional.of(known));
+
+        assertTrue(service.saveCard(stratum(), "Санкт-Петербург", fullCard("6109100000"), "1"));
+
+        verify(cardRepository).addToStratum(eq(STRATUM_ID), eq(known.getId()), any());
+        assertEquals("active", known.getStatus());
+        assertEquals(0, known.getFailedAttempts());
+        assertNull(known.getDroppedAt());
+        ArgumentCaptor<Measurement> measurement = ArgumentCaptor.forClass(Measurement.class);
+        verify(measurementRepository).insert(measurement.capture());
+        assertEquals(known.getId(), measurement.getValue().getCardId());
+        assertEquals(measurement.getValue().getParsedAt(), known.getLastMeasuredAt());
+    }
+
+    @Test
+    void skuAlreadyInSetIsNotWritten() {
+        CardEntity known = new CardEntity();
+        known.setId(UUID.randomUUID());
+        known.setSku("4569427009");
+        known.setStatus("active");
+        when(cardRepository.findBySkuAndMarketplace("4569427009", MARKETPLACE_ID))
+                .thenReturn(Optional.of(known));
+        when(cardRepository.isInSet(SET_ID, known.getId())).thenReturn(true);
+
+        assertFalse(service.saveCard(stratum(), "Санкт-Петербург", fullCard("6109100000"), "1"));
+
+        verify(cardRepository, never()).addToStratum(any(), any(), any());
+        verify(cardRepository, never()).save(any(CardEntity.class));
+        verifyNoInteractions(measurementRepository);
     }
 
     // ---------- Полный набор при создании карточки ----------
@@ -99,12 +159,13 @@ class CardWriteServiceUnitTest {
 
     @Test
     void newNicheCardWithFullContentGetsContent() {
-        service.saveNicheCard(mock(NicheEntity.class), "Санкт-Петербург", fullCard(null), "6");
+        service.saveNicheCard(niche(), "Санкт-Петербург", fullCard(null), "6");
 
         CardEntity saved = savedCard();
         assertNotNull(saved.getContentTxt());
         assertNotNull(saved.getContentTxtParsedAt());
         assertNull(saved.getTnved());
+        assertEquals(MARKETPLACE_ID, saved.getMarketplaceId());
     }
 
     @Test
@@ -158,7 +219,7 @@ class CardWriteServiceUnitTest {
 
     @Test
     void nicheCandidateIsSavedWithCandidateStatus() {
-        service.saveNicheCandidate(mock(NicheEntity.class), "Санкт-Петербург", fullCard(null), "6");
+        service.saveNicheCandidate(niche(), "Санкт-Петербург", fullCard(null), "6");
 
         CardEntity saved = savedCard();
         assertEquals("candidate", saved.getStatus());
@@ -172,8 +233,15 @@ class CardWriteServiceUnitTest {
 
     private static StratumEntity stratum() {
         StratumEntity stratum = mock(StratumEntity.class, RETURNS_DEEP_STUBS);
-        when(stratum.getSubcategory().getSet().getId()).thenReturn(UUID.randomUUID());
+        when(stratum.getId()).thenReturn(STRATUM_ID);
+        when(stratum.getSubcategory().getSet().getId()).thenReturn(SET_ID);
         return stratum;
+    }
+
+    private static NicheEntity niche() {
+        NicheEntity niche = mock(NicheEntity.class, RETURNS_DEEP_STUBS);
+        when(niche.getMarketplace().getId()).thenReturn(MARKETPLACE_ID);
+        return niche;
     }
 
     private static OzonCard fullCard(String tnved) {

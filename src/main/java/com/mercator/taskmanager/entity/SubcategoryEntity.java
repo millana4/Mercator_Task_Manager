@@ -13,6 +13,7 @@ import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.annotations.UuidGenerator;
 import org.hibernate.type.SqlTypes;
 
+import java.math.BigDecimal;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -22,6 +23,10 @@ import java.util.UUID;
  * Атрибуты, специфичные для категории (пол, слой), лежат в attrs (jsonb) —
  * это позволяет добавлять новые категории с другим набором признаков
  * без изменения схемы.
+ *
+ * share — доля подкатегории в категории, tracked — «Отслеживать подкатегорию»
+ * (своя аналитика, минимум карточек на подкатегорию). У сетов, которые
+ * не ведёт админка, share пустая.
  */
 @Entity
 @Table(name = "subcategory")
@@ -44,4 +49,10 @@ public class SubcategoryEntity {
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(nullable = false, columnDefinition = "jsonb")
     private Map<String, Object> attrs = new HashMap<>();
+
+    @Column
+    private BigDecimal share;
+
+    @Column(nullable = false)
+    private Boolean tracked = false;
 }

@@ -1,5 +1,6 @@
 package com.mercator.taskmanager.service;
 
+import com.mercator.taskmanager.assignment.SetStatus;
 import com.mercator.taskmanager.clickhouse.SearchSnapshotRepository;
 import com.mercator.taskmanager.contract.Ozon.ExcludedCard;
 import com.mercator.taskmanager.entity.CardEntity;
@@ -34,6 +35,12 @@ import java.util.UUID;
  * В задачу кладётся список частых SKU выдачи страты (search_snapshot за
  * search-priority-days суток, по убыванию частоты, без исключённых): парсер
  * берёт их первыми. ClickHouse недоступен — список пустой, подбор как раньше.
+ *
+ * Сезонная замена: черновик не подбирается; сет в сборе (collecting) подбирается
+ * только очередью SeasonalFillScheduler (sendCollectingTask), по одной страте;
+ * частые SKU для его страты — по страте активного сета с тем же запросом.
+ * Добор (refillDeficits) — только по активным сетам. Страты с нулевым
+ * количеством не подбираются.
  */
 @Service
 public class SetFillRedisService {
@@ -72,15 +79,22 @@ public class SetFillRedisService {
 
     /**
      * Запустить асинхронное наполнение сета. Возвращает число отправленных
-     * задач (= число страт). Сами карточки придут позже, в консьюмер.
+     * задач (= число страт с количеством больше нуля). Сами карточки придут
+     * позже, в консьюмер. Черновик и сет в сборе так не наполняются.
      */
     public int startFill(UUID setId) {
         SetEntity set = setRepository.findById(setId)
                 .orElseThrow(() -> new IllegalArgumentException("Сет не найден: " + setId));
+        if (SetStatus.DRAFT.equals(set.getStatus()) || SetStatus.COLLECTING.equals(set.getStatus())) {
+            throw new IllegalArgumentException("Сет " + setId + " в статусе " + set.getStatus()
+                    + ": черновик не подбирается, сет в сборе подбирается очередью сбора");
+        }
 
-        List<StratumEntity> strata = stratumRepository.findBySubcategorySetId(setId);
+        List<StratumEntity> strata = stratumRepository.findBySubcategorySetId(setId).stream()
+                .filter(st -> st.getCount() > 0)
+                .toList();
         if (strata.isEmpty()) {
-            throw new IllegalArgumentException("У сета нет страт: " + setId);
+            throw new IllegalArgumentException("У сета нет страт с количеством больше нуля: " + setId);
         }
 
         // Открываем партию: ждём столько результатов, сколько страт.
@@ -89,27 +103,7 @@ public class SetFillRedisService {
         // Рассылаем задачи по стратам.
         int sent = 0;
         for (StratumEntity stratum : strata) {
-            SelectTaskMessage task = new SelectTaskMessage();
-            task.setTaskId(UUID.randomUUID());
-            task.setSetId(setId);
-            task.setStratumId(stratum.getId());
-            task.setGeo(set.getGeo().getTitle());
-            task.setMarketplace(set.getMarketplace().getTitle());
-            task.setCategory(set.getCategory().getTitle());
-            task.setQuery(stratum.getQuery());
-            task.setCount(stratum.getCount());
-            task.setIsSeasonal(stratum.getIsSeasonal());
-            task.setBaseShare(stratum.getBaseShare() != null
-                    ? stratum.getBaseShare().doubleValue() : null);
-
-            // exclude = уже собранные карточки сета и карточки ниш маркетплейса.
-            // При первом наполнении карточек сета нет, при доборе — парсер
-            // не повторит собранное.
-            List<ExcludedCard> exclude = buildExclude(stratum.getId(), set.getMarketplace().getId());
-            task.setExclude(exclude);
-            task.setPrioritySkus(buildPrioritySkus(stratum.getId(), exclude));
-
-            taskProducer.send(task);
+            taskProducer.send(buildTask(set, stratum, stratum.getCount(), stratum.getId()));
             sent++;
         }
 
@@ -118,7 +112,7 @@ public class SetFillRedisService {
     }
 
     /**
-     * Добор недостающих карточек по всем стратам всех сетов.
+     * Добор недостающих карточек по всем стратам активных сетов.
      * По каждой страте: если active < count — запросить подбор на
      * недостающее, с exclude уже известных (включая dropped, чтобы не
      * подбирать повторно выбывшие sku). Партию НЕ открываем — это фоновой
@@ -127,35 +121,19 @@ public class SetFillRedisService {
      * @return сколько задач добора отправлено.
      */
     public int refillDeficits() {
-        List<SetEntity> sets = setRepository.findAll();
+        List<SetEntity> sets = setRepository.findByStatus(SetStatus.ACTIVE);
         int sent = 0;
 
         for (SetEntity set : sets) {
             List<StratumEntity> strata = stratumRepository.findBySubcategorySetId(set.getId());
             for (StratumEntity stratum : strata) {
-                int active = cardRepository
-                        .findByStratumIdAndStatus(stratum.getId(), "active").size();
+                int active = (int) cardRepository.countActiveStratumMembers(stratum.getId());
                 int deficit = stratum.getCount() - active;
                 if (deficit <= 0) {
                     continue;
                 }
 
-                SelectTaskMessage task = new SelectTaskMessage();
-                task.setTaskId(UUID.randomUUID());
-                task.setSetId(set.getId());
-                task.setStratumId(stratum.getId());
-                task.setGeo(set.getGeo().getTitle());
-                task.setMarketplace(set.getMarketplace().getTitle());
-                task.setCategory(set.getCategory().getTitle());
-                task.setQuery(stratum.getQuery());
-                task.setCount(deficit);                       // только недостающее
-                task.setIsSeasonal(stratum.getIsSeasonal());
-                task.setBaseShare(stratum.getBaseShare() != null
-                        ? stratum.getBaseShare().doubleValue() : null);
-                List<ExcludedCard> exclude = buildExclude(stratum.getId(), set.getMarketplace().getId());
-                task.setExclude(exclude);
-                task.setPrioritySkus(buildPrioritySkus(stratum.getId(), exclude));
-
+                SelectTaskMessage task = buildTask(set, stratum, deficit, stratum.getId());
                 taskProducer.send(task);
                 sent++;
 
@@ -173,13 +151,58 @@ public class SetFillRedisService {
         return sent;
     }
 
-    // Собрать exclude для страты.
-    // 1. Инвариант: sku уникален в пределах СЕТА, поэтому исключаем карточки всех
-    //    страт сета (не только текущей), чтобы парсер не подобрал sku, уже занятый
-    //    в соседней страте.
-    // 2. Активные карточки, созданные для ниш на этом маркетплейсе, — только sku
-    //    (без продавца, чтобы не блокировать другие товары тех же магазинов),
-    //    чтобы категория не завела вторую карточку на тот же товар.
+    /**
+     * Задача подбора страты сета в сборе (очередь SeasonalFillScheduler) на count карточек.
+     * Частые SKU — по страте активного сета связки с тем же поисковым запросом:
+     * у страты нового сета снимков выдачи ещё нет. Такой страты нет — по своей.
+     */
+    public SelectTaskMessage sendCollectingTask(StratumEntity stratum, int count) {
+        SetEntity set = stratum.getSubcategory().getSet();
+        UUID frequencyStratumId = stratumRepository.findActiveByQuery(
+                        set.getMarketplace().getId(), set.getCategory().getId(),
+                        set.getGeo().getId(), stratum.getQuery()).stream()
+                .map(StratumEntity::getId)
+                .findFirst()
+                .orElse(stratum.getId());
+
+        SelectTaskMessage task = buildTask(set, stratum, count, frequencyStratumId);
+        taskProducer.send(task);
+        log.info("Сбор сета {}: страта {} ({}), задача на {} карточек, частых в выдаче {} (по страте {})",
+                set.getId(), stratum.getId(), stratum.getQuery(), count,
+                task.getPrioritySkus().size(), frequencyStratumId);
+        return task;
+    }
+
+    // Задача подбора страты на count карточек; частые SKU выдачи — по frequencyStratumId.
+    private SelectTaskMessage buildTask(SetEntity set, StratumEntity stratum, int count,
+                                        UUID frequencyStratumId) {
+        SelectTaskMessage task = new SelectTaskMessage();
+        task.setTaskId(UUID.randomUUID());
+        task.setSetId(set.getId());
+        task.setStratumId(stratum.getId());
+        task.setGeo(set.getGeo().getTitle());
+        task.setMarketplace(set.getMarketplace().getTitle());
+        task.setCategory(set.getCategory().getTitle());
+        task.setQuery(stratum.getQuery());
+        task.setCount(count);
+        task.setIsSeasonal(stratum.getIsSeasonal());
+        task.setBaseShare(stratum.getBaseShare() != null
+                ? stratum.getBaseShare().doubleValue() : null);
+
+        // exclude = карточки сета, когда-либо собранные (и выбывшие тоже).
+        // При первом наполнении карточек сета нет, при доборе — парсер
+        // не повторит собранное и выбывшее.
+        List<ExcludedCard> exclude = buildExclude(stratum.getId(), set.getMarketplace().getId());
+        task.setExclude(exclude);
+        task.setPrioritySkus(buildPrioritySkus(frequencyStratumId, exclude));
+        return task;
+    }
+
+    // Собрать exclude для страты. Инвариант: товар входит в сет не больше одного раза,
+    // поэтому исключаем карточки всех страт сета (не только текущей), когда-либо
+    // собранные, и выбывшие тоже. Карточки других сетов и ниш не исключаются: известный
+    // товар, подобранный в страту, получает членство без второй карточки (V19).
+    // marketplaceId не используется: карточки сета — его маркетплейса.
     private List<ExcludedCard> buildExclude(UUID stratumId, Short marketplaceId) {
         StratumEntity stratum = stratumRepository.findById(stratumId)
                 .orElseThrow(() -> new IllegalArgumentException("Страта не найдена: " + stratumId));
@@ -188,22 +211,16 @@ public class SetFillRedisService {
         List<ExcludedCard> exclude = new ArrayList<>();
         Set<String> skus = new HashSet<>();
         for (StratumEntity s : stratumRepository.findBySubcategorySetId(setId)) {
-            for (CardEntity c : cardRepository.findByStratumId(s.getId())) {
+            for (CardEntity c : cardRepository.findStratumMembers(s.getId())) {
+                if (!skus.add(c.getSku())) {
+                    continue;
+                }
                 ExcludedCard ex = new ExcludedCard();
                 ex.setSku(c.getSku());
                 ex.setName(c.getName());
                 ex.setUrl(c.getUrl());
                 ex.setSeller(c.getSellerId());
                 ex.setCollection(null);
-                exclude.add(ex);
-                skus.add(c.getSku());
-            }
-        }
-
-        for (String sku : cardRepository.findActiveNicheOwnedSkus(marketplaceId)) {
-            if (skus.add(sku)) {
-                ExcludedCard ex = new ExcludedCard();
-                ex.setSku(sku);
                 exclude.add(ex);
             }
         }

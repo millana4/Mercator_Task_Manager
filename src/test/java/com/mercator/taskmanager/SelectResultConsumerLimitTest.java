@@ -23,7 +23,8 @@ import static org.mockito.Mockito.*;
 
 /**
  * Юнит-тест приёма подбора в SelectResultConsumer.handle():
- *  - лимит count страты — сверх count карточки не пишутся;
+ *  - лимит count страты (по действующим членам страты) — сверх count карточки не пишутся;
+ *  - товар уже в сете (saveCard вернул false) не занимает место в лимите;
  *  - результат без stratum_id, не принадлежащий нише, пропускается.
  * Зависимости мокнуты (без Postgres/ClickHouse). NicheSelectionService —
  * мок: isSelectTask по умолчанию false, результат идёт веткой страты.
@@ -34,32 +35,32 @@ class SelectResultConsumerLimitTest {
             .propertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE)
             .build();
 
+    private final StratumRepository stratumRepo = mock(StratumRepository.class);
+    private final CardWriteService cardWriteService = mock(CardWriteService.class);
+    private final FillBatchRegistry batchRegistry = mock(FillBatchRegistry.class);
+    private final CardRepository cardRepository = mock(CardRepository.class);
+    private final NicheSelectionService nicheSelection = mock(NicheSelectionService.class);
+    private final SelectResultConsumer consumer = new SelectResultConsumer(
+            stratumRepo, cardWriteService, batchRegistry, cardRepository, nicheSelection);
+
+    private StratumEntity stratum(UUID id, String query, int count) {
+        StratumEntity stratum = new StratumEntity();
+        stratum.setId(id);
+        stratum.setQuery(query);
+        stratum.setCount(count);
+        when(stratumRepo.findById(id)).thenReturn(Optional.of(stratum));
+        return stratum;
+    }
+
     @Test
-    void limitCutsOverflow() throws Exception {
-        StratumRepository stratumRepo = mock(StratumRepository.class);
-        CardWriteService cardWriteService = mock(CardWriteService.class);
-        FillBatchRegistry batchRegistry = mock(FillBatchRegistry.class);
-        CardRepository cardRepository = mock(CardRepository.class);
-        NicheSelectionService nicheSelection = mock(NicheSelectionService.class);
-
-        SelectResultConsumer consumer = new SelectResultConsumer(
-                stratumRepo, cardWriteService, batchRegistry, cardRepository, nicheSelection);
-
+    void limitCutsOverflow() {
         UUID stratumId = UUID.randomUUID();
         UUID setId = UUID.randomUUID();
+        StratumEntity stratum = stratum(stratumId, "Джинсы мужские", 2);   // план — 2 карточки
+        when(cardRepository.countActiveStratumMembers(stratumId)).thenReturn(0L);
+        when(cardWriteService.saveCard(any(), any(), any(), any())).thenReturn(true);
 
-        StratumEntity stratum = new StratumEntity();
-        stratum.setId(stratumId);
-        stratum.setQuery("Джинсы мужские");
-        stratum.setCount(2);                         // план — 2 карточки
-
-        when(stratumRepo.findById(stratumId)).thenReturn(Optional.of(stratum));
-        when(cardRepository.countByStratumIdAndStatus(stratumId, "active"))
-                .thenReturn(0);                      // активных пока нет
-
-        String json = buildResultJson(setId, stratumId, 5);  // подбор вернул 5
-
-        consumer.handle(json);
+        consumer.handle(buildResultJson(setId, stratumId, 5));            // подбор вернул 5
 
         // Записаны только 2 из 5 — лимит сработал. Четвёртый аргумент — метка
         // парсера из результата (в тестовом JSON её нет, поэтому null).
@@ -69,57 +70,41 @@ class SelectResultConsumerLimitTest {
     }
 
     @Test
-    void fullStratumDropsWholeResult() throws Exception {
-        StratumRepository stratumRepo = mock(StratumRepository.class);
-        CardWriteService cardWriteService = mock(CardWriteService.class);
-        FillBatchRegistry batchRegistry = mock(FillBatchRegistry.class);
-        CardRepository cardRepository = mock(CardRepository.class);
-        NicheSelectionService nicheSelection = mock(NicheSelectionService.class);
-
-        SelectResultConsumer consumer = new SelectResultConsumer(
-                stratumRepo, cardWriteService, batchRegistry, cardRepository, nicheSelection);
-
+    void duplicateInSetDoesNotTakeLimit() {
         UUID stratumId = UUID.randomUUID();
         UUID setId = UUID.randomUUID();
+        stratum(stratumId, "Джинсы мужские", 2);
+        when(cardRepository.countActiveStratumMembers(stratumId)).thenReturn(0L);
+        // первая карточка — товар уже в сете, остальные записываются
+        when(cardWriteService.saveCard(any(), any(), any(), any())).thenReturn(false, true, true);
 
-        StratumEntity stratum = new StratumEntity();
-        stratum.setId(stratumId);
-        stratum.setQuery("Носки мужские");
-        stratum.setCount(3);
+        consumer.handle(buildResultJson(setId, stratumId, 4));
 
-        when(stratumRepo.findById(stratumId)).thenReturn(Optional.of(stratum));
-        when(cardRepository.countByStratumIdAndStatus(stratumId, "active"))
-                .thenReturn(3);                      // страта уже полная
-
-        String json = buildResultJson(setId, stratumId, 4);  // подбор вернул 4
-
-        consumer.handle(json);
-
-        // Ничего не записано — результат отброшен целиком.
-        verify(cardWriteService, never())
-                .saveCard(any(), anyString(), any(OzonCard.class), any());
+        verify(cardWriteService, times(3)).saveCard(any(), any(), any(OzonCard.class), any());
+        verify(batchRegistry).recordResult(eq(setId), eq(2));
     }
 
     @Test
-    void resultWithoutStratumIsSkipped() throws Exception {
-        StratumRepository stratumRepo = mock(StratumRepository.class);
-        CardWriteService cardWriteService = mock(CardWriteService.class);
-        FillBatchRegistry batchRegistry = mock(FillBatchRegistry.class);
-        CardRepository cardRepository = mock(CardRepository.class);
-        NicheSelectionService nicheSelection = mock(NicheSelectionService.class);
+    void fullStratumDropsWholeResult() {
+        UUID stratumId = UUID.randomUUID();
+        UUID setId = UUID.randomUUID();
+        stratum(stratumId, "Носки мужские", 3);
+        when(cardRepository.countActiveStratumMembers(stratumId)).thenReturn(3L);   // страта полная
 
-        SelectResultConsumer consumer = new SelectResultConsumer(
-                stratumRepo, cardWriteService, batchRegistry, cardRepository, nicheSelection);
+        consumer.handle(buildResultJson(setId, stratumId, 4));              // подбор вернул 4
 
+        // Ничего не записано — результат отброшен целиком.
+        verify(cardWriteService, never()).saveCard(any(), anyString(), any(OzonCard.class), any());
+    }
+
+    @Test
+    void resultWithoutStratumIsSkipped() {
         // Запоздавший ответ на заменённую задачу ниши: stratum_id пуст,
         // task_id нише уже не принадлежит (isSelectTask → false).
-        String json = buildResultJson(null, null, 3);
-
-        consumer.handle(json);
+        consumer.handle(buildResultJson(null, null, 3));
 
         verify(stratumRepo, never()).findById(any());
-        verify(cardWriteService, never())
-                .saveCard(any(), anyString(), any(OzonCard.class), any());
+        verify(cardWriteService, never()).saveCard(any(), anyString(), any(OzonCard.class), any());
         verify(batchRegistry, never()).recordResult(any(), anyInt());
     }
 

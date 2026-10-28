@@ -12,12 +12,15 @@ import lombok.Setter;
 import org.hibernate.annotations.UuidGenerator;
 
 import java.math.BigDecimal;
+import java.time.OffsetDateTime;
 import java.util.UUID;
 
 /**
  * Страта — один предмет внутри подкатегории (item + поисковый запрос).
- * count — сколько карточек нужно собрать, queryShare — доля предмета
- * в объёме подкатегории.
+ * count — сколько карточек нужно собрать (0 — страта есть в задании, но не подбирается),
+ * queryShare — доля предмета в объёме подкатегории, analysisQuota — сколько карточек
+ * страты берётся в анализ категории. selectRequestedAt — когда по страте последний раз
+ * отправлялась задача подбора (очередь сбора нового сезонного сета).
  *
  * Связь: много страт → одна подкатегория.
  */
@@ -51,4 +54,13 @@ public class StratumEntity {
 
     @Column(name = "base_share")
     private BigDecimal baseShare;
+
+    @Column(name = "query_share")
+    private BigDecimal queryShare;
+
+    @Column(name = "analysis_quota")
+    private Integer analysisQuota;
+
+    @Column(name = "select_requested_at")
+    private OffsetDateTime selectRequestedAt;
 }

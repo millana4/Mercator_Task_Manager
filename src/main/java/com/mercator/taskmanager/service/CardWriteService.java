@@ -9,28 +9,27 @@ import com.mercator.taskmanager.entity.CardEntity;
 import com.mercator.taskmanager.entity.NicheEntity;
 import com.mercator.taskmanager.entity.StratumEntity;
 import com.mercator.taskmanager.repository.CardRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 /**
- * Запись одной подобранной/распарсенной карточки в три базы:
- * Postgres (card) + ClickHouse (measurement + card_snapshot).
+ * Запись подобранной/распарсенной карточки в три базы:
+ * Postgres (card, stratum_card) + ClickHouse (measurement + card_snapshot).
  *
- * Выделено из SetFillService, чтобы пользоваться и при синхронном
- * наполнении, и при приёме результатов из Redis. Порядок важен:
- * сначала Postgres (даёт UUID), потом два ClickHouse с этим UUID.
+ * Карточка — товар маркетплейса: один sku — одна карточка (V19). saveCard — товар,
+ * подобранный в страту: известный товар получает членство в страте и свежий замер,
+ * новый — карточку, членство и первый замер. saveNicheCard / saveNicheCandidate —
+ * новая карточка для ниши (проверку, что товара ещё нет, делает вызывающий код).
  *
- * saveCard — карточка страты; saveNicheCard — карточка, найденная для ниши
- * (без страты). Проверку дубля sku для ниши делает вызывающий код.
- *
- * Новая карточка сразу получает первый замер, поэтому last_measured_at
- * ставится при создании тем же временем, что parsed_at замера. Иначе обход
+ * Порядок важен: сначала Postgres (даёт UUID), потом два ClickHouse с этим UUID.
+ * Новая карточка сразу получает первый замер, поэтому last_measured_at ставится
+ * при создании тем же временем, что parsed_at замера. Иначе обход
  * (last_measured_at ASC NULLS FIRST) тут же отправил бы её на повторный парсинг.
  *
  * Полный разбор (full_content=true): карточка от парсера целиком пишется
@@ -58,32 +57,49 @@ public class CardWriteService {
         this.json = json;
     }
 
-    /** Записать карточку под стратой, с гео для замера и меткой парсера. */
-    public void saveCard(StratumEntity stratum, String geo, OzonCard card, String parserId) {
-        // Инвариант: один sku в сете максимум один раз. Если такой sku уже
-        // есть (в этой или другой страте сета) — не пишем дубль.
+    /**
+     * Товар, подобранный в страту, с гео для замера и меткой парсера.
+     * Возвращает false, если товар уже есть в этом сете (один товар в сете — один раз).
+     *
+     * Без общей транзакции: Postgres (карточка, членство) фиксируется до записи
+     * в ClickHouse — при сбое ClickHouse карточка не теряется, замер придёт с обходом.
+     * Страта может быть загружена в другой сессии: маркетплейс берётся запросом,
+     * id сета — с заглушки (без загрузки), а не через ленивую связь подкатегория → сет.
+     */
+    public boolean saveCard(StratumEntity stratum, String geo, OzonCard card, String parserId) {
         UUID setId = stratum.getSubcategory().getSet().getId();
-        if (cardRepository.existsByStratumSubcategorySetIdAndSku(setId, card.getSku())) {
-            log.warn("Дубль sku={} в сете {} — карточка не записана (уже есть)",
-                    card.getSku(), setId);
-            return;
+        Short marketplaceId = cardRepository.findMarketplaceIdOfStratum(stratum.getId());
+        OffsetDateTime measuredAt = OffsetDateTime.now();
+
+        Optional<CardEntity> known = cardRepository.findBySkuAndMarketplace(card.getSku(), marketplaceId);
+        if (known.isPresent()) {
+            CardEntity existing = known.get();
+            if (cardRepository.isInSet(setId, existing.getId())) {
+                log.warn("Дубль sku={} в сете {} — товар уже в сете, не записан", card.getSku(), setId);
+                return false;
+            }
+            cardRepository.addToStratum(stratum.getId(), existing.getId(), measuredAt);
+            reviveFromSelection(existing, card, measuredAt);
+            cardRepository.save(existing);
+            writeMeasurementAndSnapshot(existing.getId(), geo, card, parserId, measuredAt);
+            log.info("Товар sku={} уже известен (card_id={}) — добавлен в страту {} сета {}",
+                    card.getSku(), existing.getId(), stratum.getId(), setId);
+            return true;
         }
 
-        OffsetDateTime measuredAt = OffsetDateTime.now();
-        CardEntity entity = newCardEntity(card, measuredAt);
-        entity.setStratum(stratum);
-        CardEntity savedCard = cardRepository.save(entity);
-
-        writeMeasurementAndSnapshot(savedCard.getId(), geo, card, parserId, measuredAt);
+        CardEntity saved = cardRepository.save(newCardEntity(card, marketplaceId, measuredAt));
+        cardRepository.addToStratum(stratum.getId(), saved.getId(), measuredAt);
+        writeMeasurementAndSnapshot(saved.getId(), geo, card, parserId, measuredAt);
+        return true;
     }
 
-    /** Записать карточку, найденную для ниши (без страты). Возвращает созданную карточку. */
+    /** Новая карточка, найденная для ниши (без страты). Возвращает созданную карточку. */
     public CardEntity saveNicheCard(NicheEntity niche, String geo, OzonCard card, String parserId) {
         return saveNicheOwned(niche, geo, card, parserId, "active");
     }
 
     /**
-     * Записать кандидата ниши карточкой со статусом candidate: в обход и аналитику
+     * Новый кандидат ниши — карточка со статусом candidate: в обход и аналитику
      * не попадает, пока не отобран в нишу. Первый замер и снимок — данные подбора.
      */
     public CardEntity saveNicheCandidate(NicheEntity niche, String geo, OzonCard card, String parserId) {
@@ -93,7 +109,7 @@ public class CardWriteService {
     private CardEntity saveNicheOwned(NicheEntity niche, String geo, OzonCard card,
                                       String parserId, String status) {
         OffsetDateTime measuredAt = OffsetDateTime.now();
-        CardEntity entity = newCardEntity(card, measuredAt);
+        CardEntity entity = newCardEntity(card, niche.getMarketplace().getId(), measuredAt);
         entity.setStatus(status);
         entity.setNiche(niche);
         CardEntity savedCard = cardRepository.save(entity);
@@ -114,10 +130,42 @@ public class CardWriteService {
         return true;
     }
 
-    // Паспорт карточки (Postgres) без привязки к страте/нише.
-    // measuredAt - время первого замера, который пишется сразу вслед за карточкой.
-    private CardEntity newCardEntity(OzonCard card, OffsetDateTime measuredAt) {
+    // Известный товар снова подобран в страту: подбор берёт только товары в продаже —
+    // карточка активна, счётчики сброшены; паспорт, цена и время замера — из подбора.
+    private void reviveFromSelection(CardEntity entity, OzonCard card, OffsetDateTime measuredAt) {
+        entity.setStatus("active");
+        entity.setFailedAttempts(0);
+        entity.setUnavailableSince(null);
+        entity.setOutOfStockSince(null);
+        entity.setDroppedAt(null);
+        entity.setLastMeasuredAt(measuredAt);
+        if (card.getName() != null) {
+            entity.setName(card.getName());
+        }
+        if (card.getUrl() != null) {
+            entity.setUrl(card.getUrl());
+        }
+        if (card.getSeller() != null && card.getSeller().getId() != null) {
+            entity.setSellerId(card.getSeller().getId());
+        }
+        if (card.getPrice() != null && card.getPrice().getPrice() != null) {
+            entity.setLastPrice(card.getPrice().getPrice());
+        }
+        if (hasFullContent(card)) {
+            entity.setContentTxt(json.toSnakeCaseMap(card));
+            entity.setContentTxtParsedAt(measuredAt);
+            String tnved = tnvedOrNull(card);
+            if (tnved != null) {
+                entity.setTnved(tnved);
+            }
+        }
+    }
+
+    // Паспорт новой карточки (Postgres). measuredAt - время первого замера,
+    // который пишется сразу вслед за карточкой.
+    private CardEntity newCardEntity(OzonCard card, Short marketplaceId, OffsetDateTime measuredAt) {
         CardEntity entity = new CardEntity();
+        entity.setMarketplaceId(marketplaceId);
         entity.setSku(card.getSku());
         entity.setName(card.getName());
         entity.setUrl(card.getUrl());

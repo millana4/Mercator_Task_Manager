@@ -313,7 +313,7 @@ public class NicheSelectionService {
     private List<CardEntity> hintedActiveCards(UUID nicheId) {
         List<CardEntity> cards = new ArrayList<>();
         for (UUID stratumId : nicheRepository.findHintedStratumIds(nicheId)) {
-            cards.addAll(cardRepository.findByStratumIdAndStatus(stratumId, "active"));
+            cards.addAll(cardRepository.findActiveStratumMembers(stratumId));
         }
         return cards;
     }

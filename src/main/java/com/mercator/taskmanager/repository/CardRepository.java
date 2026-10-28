@@ -6,31 +6,155 @@ import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
-/** Доступ к карточкам. */
+/**
+ * Доступ к карточкам. Карточка — товар маркетплейса (один sku — одна строка, V19);
+ * состав страт — stratum_card, состав ниш — niche_card.
+ */
 @Repository
 public interface CardRepository extends JpaRepository<CardEntity, UUID> {
 
-    // Все карточки страты.
-    List<CardEntity> findByStratumId(UUID stratumId);
+    // ---------- Условие «карточка в работе» (обход, отставание, учащение, полный набор) ----------
+    // Товар активен и состоит в страте живого сета (active / collecting, членство не закрыто)
+    // или в неудалённой нише. Параметр :marketplaceId; в варианте с категорией — и :category.
+
+    String IN_WORK = """
+            c.status = 'active'
+              AND c.marketplace_id = :marketplaceId
+              AND (EXISTS (SELECT 1 FROM stratum_card sm
+                           JOIN stratum st ON st.id = sm.stratum_id
+                           JOIN subcategory sc ON sc.id = st.subcategory_id
+                           JOIN "set" s ON s.id = sc.set_id
+                           WHERE sm.card_id = c.id AND sm.removed_at IS NULL
+                             AND s.status IN ('active', 'collecting'))
+                   OR EXISTS (SELECT 1 FROM niche_card nc
+                              JOIN niche n ON n.id = nc.niche_id
+                              WHERE nc.card_id = c.id AND n.status <> 'deleted'))
+            """;
+
+    String IN_WORK_IN_CATEGORY = """
+            c.status = 'active'
+              AND c.marketplace_id = :marketplaceId
+              AND (EXISTS (SELECT 1 FROM stratum_card sm
+                           JOIN stratum st ON st.id = sm.stratum_id
+                           JOIN subcategory sc ON sc.id = st.subcategory_id
+                           JOIN "set" s ON s.id = sc.set_id
+                           JOIN category cat ON cat.id = s.category_id
+                           WHERE sm.card_id = c.id AND sm.removed_at IS NULL
+                             AND s.status IN ('active', 'collecting') AND cat.title = :category)
+                   OR EXISTS (SELECT 1 FROM niche_card nc
+                              JOIN niche n ON n.id = nc.niche_id
+                              JOIN category cat ON cat.id = n.category_id
+                              WHERE nc.card_id = c.id AND n.status <> 'deleted'
+                                AND cat.title = :category))
+            """;
 
     List<CardEntity> findByStatus(String status);
 
-    // Активные карточки страты — понадобится для периодического обхода
-    // (парсим только те, что в продаже).
-    List<CardEntity> findByStratumIdAndStatus(UUID stratumId, String status);
+    // Карточка товара на маркетплейсе (sku уникален в пределах маркетплейса).
+    @Query(value = """
+            SELECT c.* FROM card c
+            WHERE c.sku = :sku AND c.marketplace_id = :marketplaceId
+            """, nativeQuery = true)
+    Optional<CardEntity> findBySkuAndMarketplace(@Param("sku") String sku,
+                                                 @Param("marketplaceId") Short marketplaceId);
 
-    // Число активных карточек страты — для контроля лимита count при доборе.
-    int countByStratumIdAndStatus(UUID stratumId, String status);
+    // ---------- Состав страт (stratum_card) ----------
 
-    // Есть ли уже карточка с таким sku в этом сете, в любой его страте
-    boolean existsByStratumSubcategorySetIdAndSku(UUID setId, String sku);
+    // Все карточки, когда-либо входившие в страту, и выбывшие тоже — exclude подбора
+    // (парсер не повторит собранное и выбывшее), выдача внешней аналитике.
+    @Query(value = """
+            SELECT c.* FROM card c
+            JOIN stratum_card sm ON sm.card_id = c.id
+            WHERE sm.stratum_id = :stratumId
+            """, nativeQuery = true)
+    List<CardEntity> findStratumMembers(@Param("stratumId") UUID stratumId);
 
+    // Действующие члены страты: членство открыто и товар активен.
+    @Query(value = """
+            SELECT c.* FROM card c
+            JOIN stratum_card sm ON sm.card_id = c.id
+            WHERE sm.stratum_id = :stratumId AND sm.removed_at IS NULL AND c.status = 'active'
+            """, nativeQuery = true)
+    List<CardEntity> findActiveStratumMembers(@Param("stratumId") UUID stratumId);
+
+    // Число действующих членов страты — лимит count при приёме подбора, дефицит при доборе.
+    @Query(value = """
+            SELECT count(*) FROM card c
+            JOIN stratum_card sm ON sm.card_id = c.id
+            WHERE sm.stratum_id = :stratumId AND sm.removed_at IS NULL AND c.status = 'active'
+            """, nativeQuery = true)
+    long countActiveStratumMembers(@Param("stratumId") UUID stratumId);
+
+    // Действующих членов сета (открытое членство, товар активен) — ход сбора в админке.
+    @Query(value = """
+            SELECT count(*) FROM stratum_card sm
+            JOIN card c ON c.id = sm.card_id
+            JOIN stratum st ON st.id = sm.stratum_id
+            JOIN subcategory sc ON sc.id = st.subcategory_id
+            WHERE sc.set_id = :setId AND sm.removed_at IS NULL AND c.status = 'active'
+            """, nativeQuery = true)
+    long countActiveSetMembers(@Param("setId") UUID setId);
+
+    // Состоит ли карточка (в том числе выбывшей) в какой-либо страте сета:
+    // один товар в сете — не больше одного раза.
+    @Query(value = """
+            SELECT EXISTS (SELECT 1 FROM stratum_card sm
+                           JOIN stratum st ON st.id = sm.stratum_id
+                           JOIN subcategory sc ON sc.id = st.subcategory_id
+                           WHERE sm.card_id = :cardId AND sc.set_id = :setId)
+            """, nativeQuery = true)
+    boolean isInSet(@Param("setId") UUID setId, @Param("cardId") UUID cardId);
+
+    // Маркетплейс сета страты — запросом, без ленивых связей страты, загруженной в другой сессии.
+    @Query(value = """
+            SELECT s.marketplace_id FROM stratum st
+            JOIN subcategory sc ON sc.id = st.subcategory_id
+            JOIN "set" s ON s.id = sc.set_id
+            WHERE st.id = :stratumId
+            """, nativeQuery = true)
+    Short findMarketplaceIdOfStratum(@Param("stratumId") UUID stratumId);
+
+    // В скольких стратах живых сетов (active / collecting) карточка состоит.
+    @Query(value = """
+            SELECT count(*) FROM stratum_card sm
+            JOIN stratum st ON st.id = sm.stratum_id
+            JOIN subcategory sc ON sc.id = st.subcategory_id
+            JOIN "set" s ON s.id = sc.set_id
+            WHERE sm.card_id = :cardId AND sm.removed_at IS NULL
+              AND s.status IN ('active', 'collecting')
+            """, nativeQuery = true)
+    long countLiveStrata(@Param("cardId") UUID cardId);
+
+    // Включить карточку в страту (повторное включение ничего не меняет).
+    // Своя транзакция: вызывается и вне транзакции сервиса (запись результата подбора).
+    @Transactional
+    @Modifying
+    @Query(value = """
+            INSERT INTO stratum_card (stratum_id, card_id, added_at)
+            VALUES (:stratumId, :cardId, :now)
+            ON CONFLICT (stratum_id, card_id) DO NOTHING
+            """, nativeQuery = true)
+    int addToStratum(@Param("stratumId") UUID stratumId, @Param("cardId") UUID cardId,
+                     @Param("now") OffsetDateTime now);
+
+    // Карточка выбыла: членство во всех стратах закрывается (добор поставит замену,
+    // вернувшийся товар в страту не возвращается).
+    @Transactional
+    @Modifying
+    @Query(value = """
+            UPDATE stratum_card SET removed_at = :now
+            WHERE card_id = :cardId AND removed_at IS NULL
+            """, nativeQuery = true)
+    int closeStratumMemberships(@Param("cardId") UUID cardId, @Param("now") OffsetDateTime now);
+
+    // ---------- Отметки обхода и полный набор ----------
 
     // Пометить карточки отправленными (проставить last_enqueued_at) одним запросом.
     @Modifying
@@ -63,23 +187,13 @@ public interface CardRepository extends JpaRepository<CardEntity, UUID> {
                       @Param("parsedAt") OffsetDateTime parsedAt,
                       @Param("tnved") String tnved);
 
-
     // ---------- Плановый обход по интервалам категорий ----------
 
     // Просроченные карточки категории: с последнего замера прошёл интервал категории
     // (:dueBefore = now − интервал), карточка не в работе (last_enqueued_at старше окна
-    // ожидания или NULL). Первыми — самые просроченные.
-    // Маркетплейс и категория — из сета страты или из ниши-создателя.
-    @Query(value = """
-            SELECT c.* FROM card c
-            LEFT JOIN stratum st ON st.id = c.stratum_id
-            LEFT JOIN subcategory sc ON sc.id = st.subcategory_id
-            LEFT JOIN "set" s ON s.id = sc.set_id
-            LEFT JOIN niche n ON n.id = c.niche_id
-            JOIN category cat ON cat.id = COALESCE(s.category_id, n.category_id)
-            WHERE c.status = 'active'
-              AND COALESCE(s.marketplace_id, n.marketplace_id) = :marketplaceId
-              AND cat.title = :category
+    // ожидания или NULL). Первыми — самые просроченные. Товар в двух категориях попадает
+    // в выборку обеих — фактически действует более короткий интервал.
+    @Query(value = "SELECT c.* FROM card c WHERE " + IN_WORK_IN_CATEGORY + """
               AND (c.last_enqueued_at IS NULL OR c.last_enqueued_at < :inflightThreshold)
               AND (c.last_measured_at IS NULL OR c.last_measured_at < :dueBefore)
             ORDER BY c.last_measured_at ASC NULLS FIRST
@@ -91,32 +205,13 @@ public interface CardRepository extends JpaRepository<CardEntity, UUID> {
                                        @Param("inflightThreshold") OffsetDateTime inflightThreshold,
                                        @Param("limit") int limit);
 
-    // Активных карточек категории на маркетплейсе — для темпа обхода и доли просроченных.
-    @Query(value = """
-            SELECT count(*) FROM card c
-            LEFT JOIN stratum st ON st.id = c.stratum_id
-            LEFT JOIN subcategory sc ON sc.id = st.subcategory_id
-            LEFT JOIN "set" s ON s.id = sc.set_id
-            LEFT JOIN niche n ON n.id = c.niche_id
-            JOIN category cat ON cat.id = COALESCE(s.category_id, n.category_id)
-            WHERE c.status = 'active'
-              AND COALESCE(s.marketplace_id, n.marketplace_id) = :marketplaceId
-              AND cat.title = :category
-            """, nativeQuery = true)
+    // Карточек в работе в категории на маркетплейсе — для темпа обхода и доли просроченных.
+    @Query(value = "SELECT count(*) FROM card c WHERE " + IN_WORK_IN_CATEGORY, nativeQuery = true)
     long countActiveInCategory(@Param("marketplaceId") Short marketplaceId,
                                @Param("category") String category);
 
-    // Активных карточек категории без замера с :overdueBefore — для сигнала резерва.
-    @Query(value = """
-            SELECT count(*) FROM card c
-            LEFT JOIN stratum st ON st.id = c.stratum_id
-            LEFT JOIN subcategory sc ON sc.id = st.subcategory_id
-            LEFT JOIN "set" s ON s.id = sc.set_id
-            LEFT JOIN niche n ON n.id = c.niche_id
-            JOIN category cat ON cat.id = COALESCE(s.category_id, n.category_id)
-            WHERE c.status = 'active'
-              AND COALESCE(s.marketplace_id, n.marketplace_id) = :marketplaceId
-              AND cat.title = :category
+    // Карточек в работе в категории без замера с :overdueBefore — для сигнала резерва.
+    @Query(value = "SELECT count(*) FROM card c WHERE " + IN_WORK_IN_CATEGORY + """
               AND (c.last_measured_at IS NULL OR c.last_measured_at < :overdueBefore)
             """, nativeQuery = true)
     long countOverdueInCategory(@Param("marketplaceId") Short marketplaceId,
@@ -125,17 +220,10 @@ public interface CardRepository extends JpaRepository<CardEntity, UUID> {
 
     // ---------- Учащённый обход после скачка цены ----------
 
-    // Карточки на учащении, у которых с замера прошёл интервал учащения
+    // Карточки в работе на учащении, у которых с замера прошёл интервал учащения
     // (:dueBefore = now − интервал) и которые не в работе. Первыми — самые давние.
-    @Query(value = """
-            SELECT c.* FROM card c
-            LEFT JOIN stratum st ON st.id = c.stratum_id
-            LEFT JOIN subcategory sc ON sc.id = st.subcategory_id
-            LEFT JOIN "set" s ON s.id = sc.set_id
-            LEFT JOIN niche n ON n.id = c.niche_id
-            WHERE c.status = 'active'
+    @Query(value = "SELECT c.* FROM card c WHERE " + IN_WORK + """
               AND c.boost_started_at IS NOT NULL
-              AND COALESCE(s.marketplace_id, n.marketplace_id) = :marketplaceId
               AND (c.last_enqueued_at IS NULL OR c.last_enqueued_at < :inflightThreshold)
               AND (c.last_measured_at IS NULL OR c.last_measured_at < :dueBefore)
             ORDER BY c.last_measured_at ASC NULLS FIRST
@@ -153,19 +241,10 @@ public interface CardRepository extends JpaRepository<CardEntity, UUID> {
             """, nativeQuery = true)
     long countBoosted();
 
-
-    // Добор полного набора: активные карточки маркетплейса с пустым content_txt,
+    // Добор полного набора: карточки в работе с пустым content_txt,
     // кроме уже отправленных в обход (last_enqueued_at свежее порога).
-    // Маркетплейс — из сета страты или из ниши-создателя, как у обхода.
-    @Query(value = """
-            SELECT c.* FROM card c
-            LEFT JOIN stratum st ON st.id = c.stratum_id
-            LEFT JOIN subcategory sc ON sc.id = st.subcategory_id
-            LEFT JOIN "set" s ON s.id = sc.set_id
-            LEFT JOIN niche n ON n.id = c.niche_id
-            WHERE c.status = 'active'
+    @Query(value = "SELECT c.* FROM card c WHERE " + IN_WORK + """
               AND c.content_txt IS NULL
-              AND COALESCE(s.marketplace_id, n.marketplace_id) = :marketplaceId
               AND (c.last_enqueued_at IS NULL OR c.last_enqueued_at < :threshold)
             ORDER BY c.last_measured_at ASC NULLS FIRST
             LIMIT :limit
@@ -173,23 +252,6 @@ public interface CardRepository extends JpaRepository<CardEntity, UUID> {
     List<CardEntity> findContentBackfillCandidates(@Param("marketplaceId") Short marketplaceId,
                                                    @Param("threshold") OffsetDateTime threshold,
                                                    @Param("limit") int limit);
-
-
-    // Карточка с таким sku на маркетплейсе (в любой страте или нише), активная — первой.
-    // Для кандидатов ниши из выдачи: не заводить дубль уже существующей карточки.
-    @Query(value = """
-            SELECT c.* FROM card c
-            LEFT JOIN stratum st ON st.id = c.stratum_id
-            LEFT JOIN subcategory sc ON sc.id = st.subcategory_id
-            LEFT JOIN "set" s ON s.id = sc.set_id
-            LEFT JOIN niche n ON n.id = c.niche_id
-            WHERE c.sku = :sku
-              AND COALESCE(s.marketplace_id, n.marketplace_id) = :marketplaceId
-            ORDER BY (c.status = 'active') DESC
-            LIMIT 1
-            """, nativeQuery = true)
-    Optional<CardEntity> findBySkuAndMarketplace(@Param("sku") String sku,
-                                                 @Param("marketplaceId") Short marketplaceId);
 
     // ---------- Состав ниш (niche_card) ----------
 
@@ -238,11 +300,18 @@ public interface CardRepository extends JpaRepository<CardEntity, UUID> {
             """, nativeQuery = true)
     int transferOwnedCards(@Param("nicheId") UUID nicheId);
 
-    // Удаление ниши, шаг 3: оставшиеся карточки, созданные для неё, выбывают из обхода.
+    // Удаление ниши, шаг 3: оставшиеся карточки, созданные для неё, выбывают из обхода —
+    // кроме тех, что состоят в страте живого сета (их обход решает категория).
     @Modifying
     @Query(value = """
-            UPDATE card SET status = 'dropped', dropped_at = :now
-            WHERE niche_id = :nicheId AND status <> 'dropped'
+            UPDATE card c SET status = 'dropped', dropped_at = :now
+            WHERE c.niche_id = :nicheId AND c.status <> 'dropped'
+              AND NOT EXISTS (SELECT 1 FROM stratum_card sm
+                              JOIN stratum st ON st.id = sm.stratum_id
+                              JOIN subcategory sc ON sc.id = st.subcategory_id
+                              JOIN "set" s ON s.id = sc.set_id
+                              WHERE sm.card_id = c.id AND sm.removed_at IS NULL
+                                AND s.status IN ('active', 'collecting'))
             """, nativeQuery = true)
     int dropOwnedCards(@Param("nicheId") UUID nicheId, @Param("now") OffsetDateTime now);
 
@@ -253,15 +322,4 @@ public interface CardRepository extends JpaRepository<CardEntity, UUID> {
             WHERE nc.niche_id = :nicheId AND c.status = 'dropped'
             """, nativeQuery = true)
     List<UUID> findDroppedMembers(@Param("nicheId") UUID nicheId);
-
-    // sku активных карточек, созданных для ниш на маркетплейсе (без страты) —
-    // в exclude подбора страт, чтобы категория не завела вторую карточку.
-    @Query(value = """
-            SELECT c.sku FROM card c
-            JOIN niche n ON n.id = c.niche_id
-            WHERE c.stratum_id IS NULL
-              AND c.status = 'active'
-              AND n.marketplace_id = :marketplaceId
-            """, nativeQuery = true)
-    List<String> findActiveNicheOwnedSkus(@Param("marketplaceId") Short marketplaceId);
 }

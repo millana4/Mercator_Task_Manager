@@ -86,12 +86,12 @@ class AsyncFillFlowTest extends PostgresTestBase {
 
         List<StratumEntity> strata = stratumRepository.findBySubcategorySetId(savedSet.getId());
         int totalCards = strata.stream()
-                .mapToInt(s -> cardRepository.findByStratumId(s.getId()).size())
+                .mapToInt(s -> cardRepository.findStratumMembers(s.getId()).size())
                 .sum();
         assertEquals(2, totalCards, "Должно записаться 2 карточки");
 
         strata.forEach(s -> {
-            List<CardEntity> cards = cardRepository.findByStratumId(s.getId());
+            List<CardEntity> cards = cardRepository.findStratumMembers(s.getId());
             cardRepository.deleteAll(cards);
         });
         stratumRepository.deleteAll(strata);

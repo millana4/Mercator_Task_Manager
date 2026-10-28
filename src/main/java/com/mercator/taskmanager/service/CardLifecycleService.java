@@ -1,6 +1,5 @@
 package com.mercator.taskmanager.service;
 
-import com.mercator.taskmanager.entity.CardEntity;
 import com.mercator.taskmanager.repository.CardRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,6 +20,9 @@ import java.util.UUID;
  *                 notify-grace-days -> dropped (+ добор отдельно).
  * not_found    -> сразу dropped (страница удалена).
  * неудача      -> failed_attempts++, после max-failed-attempts -> dropped.
+ *
+ * Выбытие (dropped) закрывает членство карточки во всех стратах (stratum_card.removed_at):
+ * добор ставит замену, а вернувшийся позже товар в страту не возвращается.
  */
 @Service
 public class CardLifecycleService {
@@ -75,6 +77,7 @@ public class CardLifecycleService {
             if (days >= notifyGraceDays) {
                 card.setStatus("dropped");
                 card.setDroppedAt(now);
+                cardRepository.closeStratumMemberships(cardId, now);
                 log.info("Карточка {} выбыла: нет в наличии {} суток (порог {})",
                         cardId, days, notifyGraceDays);
             } else {
@@ -88,8 +91,10 @@ public class CardLifecycleService {
     @Transactional
     public void markNotFound(UUID cardId) {
         cardRepository.findById(cardId).ifPresent(card -> {
+            OffsetDateTime now = OffsetDateTime.now();
             card.setStatus("dropped");
-            card.setDroppedAt(OffsetDateTime.now());
+            card.setDroppedAt(now);
+            cardRepository.closeStratumMemberships(cardId, now);
             log.info("Карточка {} выбыла: страница удалена (404)", cardId);
             cardRepository.save(card);
         });
@@ -111,8 +116,10 @@ public class CardLifecycleService {
                 card.setUnavailableSince(OffsetDateTime.now());
             }
             if (attempts >= maxFailedAttempts) {
+                OffsetDateTime now = OffsetDateTime.now();
                 card.setStatus("dropped");
-                card.setDroppedAt(OffsetDateTime.now());
+                card.setDroppedAt(now);
+                cardRepository.closeStratumMemberships(cardId, now);
                 log.info("Карточка {} выбыла после {} неудач", cardId, attempts);
             } else {
                 card.setStatus("stale");

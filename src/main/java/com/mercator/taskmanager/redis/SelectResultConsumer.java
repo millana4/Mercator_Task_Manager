@@ -103,7 +103,7 @@ public class SelectResultConsumer {
         // Лимит страты: не записывать сверх count. Контроль здесь — единственная
         // общая точка, через которую проходит каждая подобранная карточка
         // (и cron-добор, и ручной запуск). Считаем остаток по актуальному active.
-        int active = cardRepository.countByStratumIdAndStatus(stratum.getId(), "active");
+        int active = (int) cardRepository.countActiveStratumMembers(stratum.getId());
         int remaining = stratum.getCount() - active;
         if (remaining <= 0) {
             log.warn("Страта {} ({}) уже укомплектована (active={}, count={}) — "
@@ -123,8 +123,9 @@ public class SelectResultConsumer {
                 break;
             }
             try {
-                cardWriteService.saveCard(stratum, result.getGeo(), card, result.getParserId());
-                saved++;
+                if (cardWriteService.saveCard(stratum, result.getGeo(), card, result.getParserId())) {
+                    saved++;
+                }
             } catch (Exception e) {
                 log.error("Карточка sku={} не записана (task_id={}): {}",
                         card.getSku(), result.getTaskId(), e.getMessage(), e);

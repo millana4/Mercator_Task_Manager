@@ -14,20 +14,22 @@ import org.springframework.web.filter.OncePerRequestFilter;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.List;
 
 /**
- * Проверка межсервисного ключа для эндпоинтов ниш (/api/v1/niches...).
- * Заголовок Authorization: Bearer <ключ>, ключ — PARSER_API_KEY
- * (единый межсервисный ключ на этой машине). Остальные эндпоинты не затрагиваются.
+ * Проверка межсервисного ключа для эндпоинтов ниш (/api/v1/niches...) и админки
+ * (/api/v1/admin... — вызывает шлюз сервиса аналитики). Заголовок Authorization:
+ * Bearer <ключ>, ключ — PARSER_API_KEY (единый межсервисный ключ на этой машине).
+ * Остальные эндпоинты не затрагиваются.
  *
- * Ключ не задан — эндпоинты ниш закрыты (500), а не открыты.
+ * Ключ не задан — защищённые эндпоинты закрыты (500), а не открыты.
  */
 @Component
 public class NicheApiKeyFilter extends OncePerRequestFilter {
 
     private static final Logger log = LoggerFactory.getLogger(NicheApiKeyFilter.class);
 
-    private static final String PATH_PREFIX = "/api/v1/niches";
+    private static final List<String> PATH_PREFIXES = List.of("/api/v1/niches", "/api/v1/admin");
     private static final String BEARER = "Bearer ";
 
     private final byte[] expectedKey;
@@ -38,7 +40,8 @@ public class NicheApiKeyFilter extends OncePerRequestFilter {
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
-        return !request.getRequestURI().startsWith(PATH_PREFIX);
+        String uri = request.getRequestURI();
+        return PATH_PREFIXES.stream().noneMatch(uri::startsWith);
     }
 
     @Override
@@ -46,7 +49,7 @@ public class NicheApiKeyFilter extends OncePerRequestFilter {
                                     HttpServletResponse response,
                                     FilterChain chain) throws ServletException, IOException {
         if (expectedKey.length == 0) {
-            log.error("PARSER_API_KEY не задан — эндпоинты ниш закрыты");
+            log.error("PARSER_API_KEY не задан — эндпоинты ниш и админки закрыты");
             reject(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
                     "Сервис не сконфигурирован: отсутствует PARSER_API_KEY");
             return;

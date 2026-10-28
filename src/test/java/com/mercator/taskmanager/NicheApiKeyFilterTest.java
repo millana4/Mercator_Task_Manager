@@ -56,6 +56,24 @@ class NicheApiKeyFilterTest {
     }
 
     @Test
+    void adminRejectsWithoutKey() throws Exception {
+        MockFilterChain chain = new MockFilterChain();
+        MockHttpServletResponse resp = run(new NicheApiKeyFilter("secret"), "/api/v1/admin/overview",
+                null, chain);
+        assertThat(resp.getStatus()).isEqualTo(401);
+        assertThat(chain.getRequest()).isNull();
+    }
+
+    @Test
+    void adminPassesWithRightKey() throws Exception {
+        MockFilterChain chain = new MockFilterChain();
+        MockHttpServletResponse resp = run(new NicheApiKeyFilter("secret"), "/api/v1/admin/drafts/1/start",
+                "Bearer secret", chain);
+        assertThat(resp.getStatus()).isEqualTo(200);
+        assertThat(chain.getRequest()).isNotNull();
+    }
+
+    @Test
     void missingConfiguredKeyClosesEndpoints() throws Exception {
         MockFilterChain chain = new MockFilterChain();
         MockHttpServletResponse resp = run(new NicheApiKeyFilter(""), "/api/v1/niches",
