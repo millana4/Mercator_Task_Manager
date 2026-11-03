@@ -163,7 +163,7 @@ yandex:
     api-url: ${YANDEX_API_URL:https://llm.api.cloud.yandex.net/v1}
     api-key: ${YANDEX_API_KEY:}
     folder-id: ${YANDEX_FOLDER_ID:}
-    model: ${YANDEX_MODEL:deepseek-v4-flash}
+    model: ${YANDEX_MODEL:deepseek-v4.1-flash}
     temperature: ${YANDEX_TEMPERATURE:0.2}
     max-tokens: ${YANDEX_MAX_TOKENS:500}
     timeout-seconds: ${YANDEX_TIMEOUT_SECONDS:60}

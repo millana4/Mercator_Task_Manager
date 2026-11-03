@@ -140,6 +140,11 @@ public class ParseResultConsumer {
         // Потоковый обход: отметить, что карточку только что померили.
         cardRepository.markMeasured(result.getCardId(), measuredAt);
 
+        // Главное фото: новое или изменившееся; пустое (фото не найдено) прежнее не затирает.
+        if (card.getImageUrl() != null && !card.getImageUrl().isBlank()) {
+            cardRepository.updateImageUrl(result.getCardId(), card.getImageUrl());
+        }
+
         // Скачок цены: учащённый обход, last_price.
         priceBoostService.onMeasured(result.getCardId(), m.getPrice(), measuredAt);
 

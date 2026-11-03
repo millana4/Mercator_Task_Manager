@@ -23,6 +23,7 @@ public class OzonCard {
     // Идентификация
     private String sku;         // артикул товара
     private String url;         // URL карточки
+    private String imageUrl;    // image_url — главное фото (og:image); null — не найдено
     private String parsedAt;    // parsed_at — дата и время парсинга (ISO-строка)
     private String name;        // наименование
     private String brand;       // бренд

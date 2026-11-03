@@ -68,6 +68,10 @@ public class CardEntity {
     @Column
     private String url;
 
+    // Главное фото карточки (og:image, вариант 600 px); null — фото ещё не приходило
+    @Column(name = "image_url")
+    private String imageUrl;
+
     @Column(name = "seller_id")
     private String sellerId;
 

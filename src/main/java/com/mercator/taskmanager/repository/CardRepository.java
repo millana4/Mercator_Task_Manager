@@ -172,6 +172,15 @@ public interface CardRepository extends JpaRepository<CardEntity, UUID> {
             """, nativeQuery = true)
     void markMeasured(@Param("id") UUID id, @Param("now") OffsetDateTime now);
 
+    // Главное фото карточки: новое или изменившееся. Вызывается только с непустым адресом,
+    // поэтому отсутствие фото в ответе парсера прежнее не затирает.
+    @Modifying
+    @Query(value = """
+            UPDATE card SET image_url = CAST(:imageUrl AS text)
+            WHERE id = :id AND image_url IS DISTINCT FROM CAST(:imageUrl AS text)
+            """, nativeQuery = true)
+    int updateImageUrl(@Param("id") UUID id, @Param("imageUrl") String imageUrl);
+
     // Полный набор карточки (полный разбор): content_txt и время разбора
     // перезаписываются, ТН ВЭД меняется только на непустое значение.
     @Modifying

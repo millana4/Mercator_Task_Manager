@@ -52,7 +52,7 @@ public class YandexLlmClient {
             @Value("${yandex.ai.api-url:https://llm.api.cloud.yandex.net/v1}") String apiUrl,
             @Value("${yandex.ai.api-key:}") String apiKey,
             @Value("${yandex.ai.folder-id:}") String folderId,
-            @Value("${yandex.ai.model:deepseek-v4-flash}") String model,
+            @Value("${yandex.ai.model:deepseek-v4.1-flash}") String model,
             @Value("${yandex.ai.temperature:0.2}") double temperature,
             @Value("${yandex.ai.max-tokens:500}") int maxTokens,
             @Value("${yandex.ai.timeout-seconds:60}") int timeoutSeconds) {

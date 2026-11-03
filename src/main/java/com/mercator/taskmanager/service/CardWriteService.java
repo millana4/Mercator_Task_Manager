@@ -145,6 +145,10 @@ public class CardWriteService {
         if (card.getUrl() != null) {
             entity.setUrl(card.getUrl());
         }
+        String imageUrl = imageUrlOrNull(card);
+        if (imageUrl != null) {
+            entity.setImageUrl(imageUrl);
+        }
         if (card.getSeller() != null && card.getSeller().getId() != null) {
             entity.setSellerId(card.getSeller().getId());
         }
@@ -169,6 +173,7 @@ public class CardWriteService {
         entity.setSku(card.getSku());
         entity.setName(card.getName());
         entity.setUrl(card.getUrl());
+        entity.setImageUrl(imageUrlOrNull(card));
         entity.setSellerId(card.getSeller() != null ? card.getSeller().getId() : null);
         entity.setCollection(resolveCollection(card));
         entity.setStatus("active");
@@ -237,6 +242,11 @@ public class CardWriteService {
     private static String tnvedOrNull(OzonCard card) {
         String tnved = card.getTnved();
         return tnved != null && !tnved.isBlank() ? tnved : null;
+    }
+
+    private static String imageUrlOrNull(OzonCard card) {
+        String imageUrl = card.getImageUrl();
+        return imageUrl != null && !imageUrl.isBlank() ? imageUrl : null;
     }
 
     private Float parseFloat(String s) {
