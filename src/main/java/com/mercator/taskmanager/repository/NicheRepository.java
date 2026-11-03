@@ -27,6 +27,11 @@ public interface NicheRepository extends JpaRepository<NicheEntity, UUID> {
 
     Optional<NicheEntity> findBySelectTaskId(UUID selectTaskId);
 
+    // Опоздавший результат поиска автодобора: задача снята по таймауту.
+    boolean existsByRefillLostTaskId(UUID refillLostTaskId);
+
+    Optional<NicheEntity> findByRefillLostTaskId(UUID refillLostTaskId);
+
     // Ниши в статусе — для планировщика.
     List<NicheEntity> findByStatus(String status);
 

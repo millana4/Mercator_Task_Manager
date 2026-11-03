@@ -32,7 +32,8 @@ import java.util.Arrays;
  * на проверке) — поиск на дефицит × candidate-multiplier. Интервал между поисками
  * по нише - refill-interval-hours; после поисков подряд без новых кандидатов
  * (выдача исчерпана) - ступени refill-empty-backoff-hours (24 ч, затем 72 ч).
- * Задача без результата дольше select-timeout-hours считается потерянной.
+ * Задача без результата дольше select-timeout-hours (12 ч) снимается: можно искать снова,
+ * а её опоздавший результат ещё принимается (refill_lost_task_id, NicheSelectionService).
  */
 @Service
 public class NicheRefillService {
@@ -63,7 +64,7 @@ public class NicheRefillService {
                               long refillIntervalHours,
                               @Value("${taskmanager.niche.refill-empty-backoff-hours:24,72}")
                               String emptyBackoffHours,
-                              @Value("${taskmanager.niche.select-timeout-hours:3}")
+                              @Value("${taskmanager.niche.select-timeout-hours:12}")
                               long selectTimeoutHours,
                               @Value("${taskmanager.monitoring.inflight-timeout-minutes:45}")
                               long verifyTimeoutMinutes) {
@@ -178,9 +179,10 @@ public class NicheRefillService {
             if (niche.getSelectTaskId() != null) {
                 if (niche.getRefillRequestedAt() != null
                         && niche.getRefillRequestedAt().isBefore(timeoutThreshold)) {
-                    log.warn("Ниша id={}: результат поиска автодобора не пришёл за {} ч, задача "
-                                    + "считается потерянной (task_id={})",
+                    log.warn("Ниша id={}: результат поиска автодобора не пришёл за {} ч, задача снята; "
+                                    + "опоздавший результат будет принят (task_id={})",
                             niche.getId(), selectTimeoutHours, niche.getSelectTaskId());
+                    niche.setRefillLostTaskId(niche.getSelectTaskId());
                     niche.setSelectTaskId(null);
                     nicheRepository.save(niche);
                 }

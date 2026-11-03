@@ -126,7 +126,7 @@ taskmanager:
     # не раньше select-retry-hours после прошлой задачи.
     enabled: ${SEASON_ENABLED:true}
     select-interval-minutes: ${SEASON_SELECT_INTERVAL_MINUTES:30}
-    select-retry-hours: ${SEASON_SELECT_RETRY_HOURS:24}
+    select-retry-hours: ${SEASON_SELECT_RETRY_HOURS:12}
     tick-ms: ${SEASON_TICK_MS:60000}
     # Проверка готовности сетов в сборе и переключение (МСК): через 30 мин после батча аналитики.
     switch-cron: ${SEASON_SWITCH_CRON:0 15 1,13 * * *}
@@ -147,8 +147,9 @@ taskmanager:
     llm-max-attempts: ${NICHE_LLM_MAX_ATTEMPTS:3}
     # Пауза после неудачного обращения к нейросети перед повтором, мин.
     llm-retry-delay-minutes: ${NICHE_LLM_RETRY_DELAY_MINUTES:5}
-    # Окно ожидания результата пачки подбора, ч. Затем задача отправляется повторно.
-    select-timeout-hours: ${NICHE_SELECT_TIMEOUT_HOURS:3}
+    # Окно ожидания результата подбора ниши, ч: пачка первичного подбора отправляется повторно,
+    # поиск автодобора снимается (его опоздавший результат ещё принимается).
+    select-timeout-hours: ${NICHE_SELECT_TIMEOUT_HOURS:12}
     # Пауза после неудачного подбора перед повтором, мин.
     select-retry-delay-minutes: ${NICHE_SELECT_RETRY_DELAY_MINUTES:30}
     # Поиск новых кандидатов автодобора по нише — не чаще раза в N часов.

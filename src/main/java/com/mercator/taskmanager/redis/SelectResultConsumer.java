@@ -76,9 +76,9 @@ public class SelectResultConsumer {
             return;
         }
 
-        log.info("Результат подбора: task_id={}, stratum_id={}, ok={}, найдено={}",
+        log.info("Результат подбора: task_id={}, stratum_id={}, ok={}, найдено={}, parser_id={}",
                 result.getTaskId(), result.getStratumId(),
-                result.getOk(), result.getFoundCount());
+                result.getOk(), result.getFoundCount(), result.getParserId());
 
         if (Boolean.FALSE.equals(result.getOk())) {
             log.warn("Подбор task_id={} завершился ошибкой: {}",

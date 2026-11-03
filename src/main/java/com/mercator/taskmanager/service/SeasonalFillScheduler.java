@@ -28,7 +28,7 @@ import java.util.Objects;
  * сначала обход, потом подбор.
  *
  * Какая страта: с дефицитом (active < count), которую ни разу не отправляли или
- * отправляли раньше select-retry-hours (24 ч) назад. Порядок: сначала неотправленные —
+ * отправляли раньше select-retry-hours (12 ч) назад. Порядок: сначала неотправленные —
  * по убыванию квоты анализа, затем повторы — самые давние первыми. Задача — на дефицит.
  * Время отправки — stratum.select_requested_at (переживает перезапуск).
  */
@@ -62,7 +62,7 @@ public class SeasonalFillScheduler {
                                  MonitoringScheduler monitoring,
                                  @Value("${taskmanager.season.enabled:true}") boolean enabled,
                                  @Value("${taskmanager.season.select-interval-minutes:30}") long intervalMinutes,
-                                 @Value("${taskmanager.season.select-retry-hours:24}") long retryHours) {
+                                 @Value("${taskmanager.season.select-retry-hours:12}") long retryHours) {
         this.marketplaceRepository = marketplaceRepository;
         this.stratumRepository = stratumRepository;
         this.cardRepository = cardRepository;

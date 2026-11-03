@@ -116,15 +116,21 @@ public class NicheSelectionService {
                 niche.getId(), niche.getSearchQuery(), count, taskId);
     }
 
-    /** Принадлежит ли результат подбора задаче какой-либо ниши. */
+    /**
+     * Принадлежит ли результат подбора задаче какой-либо ниши: текущей
+     * или поиску автодобора, снятому по таймауту (опоздавший результат).
+     */
     public boolean isSelectTask(UUID taskId) {
-        return taskId != null && nicheRepository.existsBySelectTaskId(taskId);
+        return taskId != null && (nicheRepository.existsBySelectTaskId(taskId)
+                || nicheRepository.existsByRefillLostTaskId(taskId));
     }
 
     @Transactional
     public void handleResult(SelectResultMessage result) {
         NicheEntity niche = nicheRepository.findBySelectTaskId(result.getTaskId()).orElse(null);
         if (niche == null) {
+            nicheRepository.findByRefillLostTaskId(result.getTaskId())
+                    .ifPresent(late -> handleLateRefillResult(late, result));
             return;
         }
         if (NicheStatus.SELECTING.equals(niche.getStatus())) {
@@ -187,7 +193,26 @@ public class NicheSelectionService {
     // Неудачный поиск (антибот, ошибка) счётчик не меняет: это не признак исчерпанной выдачи.
     private void handleRefillResult(NicheEntity niche, SelectResultMessage result) {
         niche.setSelectTaskId(null);
+        applyRefillResult(niche, result);
+    }
 
+    // ---------- Автодобор: опоздавший результат поиска ----------
+    // Задача снята по таймауту (refill_lost_task_id), результат всё же пришёл. Обрабатывается
+    // как обычный; текущий поиск (select_task_id), если он уже ушёл, не трогается.
+    private void handleLateRefillResult(NicheEntity niche, SelectResultMessage result) {
+        niche.setRefillLostTaskId(null);
+        if (!NicheStatus.ACTIVE.equals(niche.getStatus())) {
+            log.info("Ниша id={}: опоздавший результат автодобора пропущен, статус {} (task_id={})",
+                    niche.getId(), niche.getStatus(), result.getTaskId());
+            return;
+        }
+        log.info("Ниша id={}: результат поиска автодобора пришёл после таймаута — принят "
+                        + "(task_id={}, parser_id={})",
+                niche.getId(), result.getTaskId(), result.getParserId());
+        applyRefillResult(niche, result);
+    }
+
+    private void applyRefillResult(NicheEntity niche, SelectResultMessage result) {
         if (Boolean.FALSE.equals(result.getOk())) {
             log.warn("Ниша id={}: поиск кандидатов автодобора не удался (parser_id={}), "
                             + "следующий — после интервала: {}",

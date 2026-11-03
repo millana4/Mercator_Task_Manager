@@ -98,6 +98,10 @@ public class NicheEntity {
     @Column(name = "select_task_id")
     private UUID selectTaskId;
 
+    // поиск автодобора, снятый по таймауту: его опоздавший результат ещё принимается
+    @Column(name = "refill_lost_task_id")
+    private UUID refillLostTaskId;
+
     // время последнего поиска кандидатов автодобора
     @Column(name = "refill_requested_at")
     private OffsetDateTime refillRequestedAt;

@@ -66,7 +66,7 @@ public class NicheScheduler {
                           int llmMaxAttempts,
                           @Value("${taskmanager.niche.llm-retry-delay-minutes:5}")
                           long llmRetryDelayMinutes,
-                          @Value("${taskmanager.niche.select-timeout-hours:3}")
+                          @Value("${taskmanager.niche.select-timeout-hours:12}")
                           long selectTimeoutHours,
                           @Value("${taskmanager.niche.select-retry-delay-minutes:30}")
                           long selectRetryDelayMinutes) {
