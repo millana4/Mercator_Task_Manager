@@ -83,6 +83,7 @@ public class SelectResultConsumer {
         if (Boolean.FALSE.equals(result.getOk())) {
             log.warn("Подбор task_id={} завершился ошибкой: {}",
                     result.getTaskId(), result.getError());
+            releaseExpired(result);
             return;
         }
 
@@ -136,5 +137,23 @@ public class SelectResultConsumer {
                 result.getTaskId(), saved, remaining);
 
         batchRegistry.recordResult(result.getSetId(), saved);
+    }
+
+    /** Начало текста ответа парсера, не взявшего задачу в срок (стояла в очереди дольше срока жизни). */
+    static final String EXPIRED_PREFIX = "Задача подбора устарела";
+
+    // Задача просрочена и не выполнялась: страта снова считается неотправленной,
+    // планировщик сбора отправит её заново, а не через select-retry-hours.
+    private void releaseExpired(SelectResultMessage result) {
+        String error = result.getError();
+        if (error == null || !error.startsWith(EXPIRED_PREFIX)) {
+            return;
+        }
+        stratumRepository.findById(result.getStratumId()).ifPresent(stratum -> {
+            stratum.setSelectRequestedAt(null);
+            stratumRepository.save(stratum);
+            log.info("Задача подбора просрочена в очереди: страта {} ({}) будет отправлена заново",
+                    stratum.getId(), stratum.getQuery());
+        });
     }
 }

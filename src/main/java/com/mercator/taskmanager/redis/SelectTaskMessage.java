@@ -36,4 +36,5 @@ public class SelectTaskMessage {
     private Double baseShare;
     private List<ExcludedCard> exclude;
     private List<PrioritySku> prioritySkus;
+    private String createdAt;
 }
