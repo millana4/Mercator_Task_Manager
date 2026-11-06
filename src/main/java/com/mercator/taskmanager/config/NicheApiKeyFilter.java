@@ -17,7 +17,8 @@ import java.security.MessageDigest;
 import java.util.List;
 
 /**
- * Проверка межсервисного ключа для эндпоинтов ниш (/api/v1/niches...) и админки
+ * Проверка межсервисного ключа для эндпоинтов ниш (/api/v1/niches...), рекомендаций
+ * по закупкам (/api/v1/prod_specs...) и админки
  * (/api/v1/admin... — вызывает шлюз сервиса аналитики). Заголовок Authorization:
  * Bearer <ключ>, ключ — PARSER_API_KEY (единый межсервисный ключ на этой машине).
  * Остальные эндпоинты не затрагиваются.
@@ -29,7 +30,8 @@ public class NicheApiKeyFilter extends OncePerRequestFilter {
 
     private static final Logger log = LoggerFactory.getLogger(NicheApiKeyFilter.class);
 
-    private static final List<String> PATH_PREFIXES = List.of("/api/v1/niches", "/api/v1/admin");
+    private static final List<String> PATH_PREFIXES =
+            List.of("/api/v1/niches", "/api/v1/admin", "/api/v1/prod_specs");
     private static final String BEARER = "Bearer ";
 
     private final byte[] expectedKey;

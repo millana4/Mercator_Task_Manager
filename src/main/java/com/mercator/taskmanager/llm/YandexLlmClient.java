@@ -29,7 +29,11 @@ import java.util.Map;
  * - авторизация: Api-Key сервисного аккаунта + x-folder-id;
  * - модель: gpt://<folder_id>/<model>;
  * - x-data-logging-enabled: false — запросы не сохраняются на стороне Яндекса;
- * - deepseek: reasoning_effort = none (рассуждения тратят токены и время, не нужны).
+ * - deepseek и qwen: reasoning_effort = none (рассуждения тратят токены и время, не нужны);
+ * - картинка передаётся ссылкой (image_url) — модель принимает адрес, скачивать файл не нужно.
+ *
+ * chat — текстовый запрос с моделью из настроек; complete — общий вызов: модель, лимит
+ * токенов, температура и картинка задаются в запросе.
  *
  * Ключи проверяются при вызове, а не при старте: ядро запускается и без них.
  */
@@ -82,31 +86,50 @@ public class YandexLlmClient {
     }
 
     /**
-     * Отправить запрос: системный промпт + сообщение пользователя.
+     * Отправить запрос: системный промпт + сообщение пользователя, модель из настроек.
      *
      * @throws LlmException AUTH / TIMEOUT / OTHER
      */
     public LlmResponse chat(String systemPrompt, String userPrompt) {
+        return complete(LlmRequest.text(model, systemPrompt, userPrompt, null));
+    }
+
+    /**
+     * Общий вызов: модель, лимит токенов, температура и картинка — из запроса;
+     * не заданные берутся из настроек клиента.
+     *
+     * @throws LlmException AUTH / TIMEOUT / OTHER
+     */
+    public LlmResponse complete(LlmRequest request) {
         if (apiKey.isEmpty() || folderId.isEmpty()) {
             throw new LlmException(LlmException.Kind.AUTH,
                     "Не заданы YANDEX_API_KEY или YANDEX_FOLDER_ID");
         }
+        String useModel = request.model() == null || request.model().isBlank()
+                ? model : request.model();
+        int limit = request.maxTokens() != null ? request.maxTokens() : maxTokens;
+        double temp = request.temperature() != null ? request.temperature() : temperature;
+        boolean withImage = request.imageUrl() != null && !request.imageUrl().isBlank();
 
         // ---------- 1. Тело запроса ----------
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("model", "gpt://" + folderId + "/" + model);
+        body.put("model", "gpt://" + folderId + "/" + useModel);
         body.put("messages", List.of(
-                Map.of("role", "system", "content", systemPrompt),
-                Map.of("role", "user", "content", userPrompt)));
-        body.put("temperature", temperature);
-        body.put("max_tokens", maxTokens);
-        if (model.toLowerCase(Locale.ROOT).contains("deepseek")) {
+                message("system", request.systemPrompt()),
+                message("user", withImage
+                        ? List.of(textPart(request.userPrompt()), imagePart(request.imageUrl()))
+                        : request.userPrompt())));
+        body.put("temperature", temp);
+        body.put("max_tokens", limit);
+        String lowerModel = useModel.toLowerCase(Locale.ROOT);
+        if (lowerModel.contains("deepseek") || lowerModel.contains("qwen")) {
             body.put("reasoning_effort", "none");
         }
         String json = mapper.writeValueAsString(body);
 
-        log.info("Yandex AI Studio: запрос, model={}, system={} симв., user={} симв.",
-                model, systemPrompt.length(), userPrompt.length());
+        log.info("Yandex AI Studio: запрос, model={}, system={} симв., user={} симв.{}",
+                useModel, request.systemPrompt().length(), request.userPrompt().length(),
+                withImage ? ", с картинкой" : "");
 
         // ---------- 2. Отправка ----------
         ResponseEntity<String> response;
@@ -120,12 +143,12 @@ public class YandexLlmClient {
                     .accept(MediaType.APPLICATION_JSON)
                     .body(json)
                     .retrieve()
-                    .onStatus(status -> true, (request, resp) -> { })  // статус разбираем сами
+                    .onStatus(status -> true, (req, resp) -> { })  // статус разбираем сами
                     .toEntity(String.class);
         } catch (ResourceAccessException e) {
             if (isTimeout(e)) {
                 throw new LlmException(LlmException.Kind.TIMEOUT,
-                        "Yandex AI Studio: таймаут " + timeoutSeconds + " с, model=" + model, e);
+                        "Yandex AI Studio: таймаут " + timeoutSeconds + " с, model=" + useModel, e);
             }
             throw new LlmException(LlmException.Kind.OTHER,
                     "Yandex AI Studio: запрос не выполнен: " + e.getMessage(), e);
@@ -158,15 +181,50 @@ public class YandexLlmClient {
                     "Yandex AI Studio: в ответе нет choices[0].message: " + abbreviate(raw));
         }
 
-        String content = parsed.choices().get(0).message().content();
-        int tokens = parsed.usage() != null && parsed.usage().totalTokens() != null
-                ? parsed.usage().totalTokens() : 0;
+        Choice choice = parsed.choices().get(0);
+        String content = choice.message().content();
+        if ((content == null || content.isBlank()) && "length".equals(choice.finishReason())) {
+            throw new LlmException(LlmException.Kind.OTHER,
+                    "Yandex AI Studio: ответ пуст, генерация остановлена по лимиту max_tokens="
+                            + limit + " (рассуждение расходует токены?), model=" + useModel);
+        }
+
+        Usage usage = parsed.usage();
+        Integer promptTokens = usage != null ? usage.promptTokens() : null;
+        Integer completionTokens = usage != null ? usage.completionTokens() : null;
+        int tokens = usage != null && usage.totalTokens() != null ? usage.totalTokens()
+                : (promptTokens != null ? promptTokens : 0)
+                + (completionTokens != null ? completionTokens : 0);
         String modelName = shortModelName(parsed.model());
 
-        log.info("Yandex AI Studio: ответ, model={}, tokens={}, {} симв.",
-                modelName, tokens, content == null ? 0 : content.length());
+        log.info("Yandex AI Studio: ответ, model={}, tokens={} (вход {}, выход {}), {} симв.",
+                modelName, tokens, promptTokens, completionTokens,
+                content == null ? 0 : content.length());
         return new LlmResponse(content == null ? "" : content,
-                modelName != null ? modelName : model, tokens);
+                modelName != null ? modelName : useModel, tokens, promptTokens, completionTokens);
+    }
+
+    // ---------- Части запроса ----------
+
+    private static Map<String, Object> message(String role, Object content) {
+        Map<String, Object> message = new LinkedHashMap<>();
+        message.put("role", role);
+        message.put("content", content);
+        return message;
+    }
+
+    private static Map<String, Object> textPart(String text) {
+        Map<String, Object> part = new LinkedHashMap<>();
+        part.put("type", "text");
+        part.put("text", text);
+        return part;
+    }
+
+    private static Map<String, Object> imagePart(String url) {
+        Map<String, Object> part = new LinkedHashMap<>();
+        part.put("type", "image_url");
+        part.put("image_url", Map.of("url", url));
+        return part;
     }
 
     /** gpt://<folder>/deepseek-v4-flash/latest → deepseek-v4-flash */
@@ -205,7 +263,7 @@ public class YandexLlmClient {
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)
-    record Choice(Message message) {
+    record Choice(Message message, @JsonProperty("finish_reason") String finishReason) {
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)
@@ -213,6 +271,8 @@ public class YandexLlmClient {
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)
-    record Usage(@JsonProperty("total_tokens") Integer totalTokens) {
+    record Usage(@JsonProperty("prompt_tokens") Integer promptTokens,
+                 @JsonProperty("completion_tokens") Integer completionTokens,
+                 @JsonProperty("total_tokens") Integer totalTokens) {
     }
 }

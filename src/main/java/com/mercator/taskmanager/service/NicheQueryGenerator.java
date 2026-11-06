@@ -5,8 +5,9 @@ import com.mercator.taskmanager.entity.NicheLlmLogEntity;
 import com.mercator.taskmanager.entity.StratumEntity;
 import com.mercator.taskmanager.entity.SubcategoryEntity;
 import com.mercator.taskmanager.llm.LlmException;
+import com.mercator.taskmanager.llm.LlmGateway;
+import com.mercator.taskmanager.llm.LlmRequest;
 import com.mercator.taskmanager.llm.LlmResponse;
-import com.mercator.taskmanager.llm.YandexLlmClient;
 import com.mercator.taskmanager.repository.NicheLlmLogRepository;
 import com.mercator.taskmanager.repository.StratumRepository;
 import org.springframework.stereotype.Service;
@@ -56,12 +57,12 @@ public class NicheQueryGenerator {
             {"search_query": "...", "strata": [номера]}
             """;
 
-    private final YandexLlmClient llm;
+    private final LlmGateway llm;
     private final StratumRepository stratumRepository;
     private final NicheLlmLogRepository logRepository;
     private final JsonMapper mapper = JsonMapper.builder().build();
 
-    public NicheQueryGenerator(YandexLlmClient llm,
+    public NicheQueryGenerator(LlmGateway llm,
                                StratumRepository stratumRepository,
                                NicheLlmLogRepository logRepository) {
         this.llm = llm;
@@ -90,7 +91,8 @@ public class NicheQueryGenerator {
 
         // ---------- 2. Вызов и разбор; журнал пишется в любом случае ----------
         try {
-            LlmResponse response = llm.chat(systemPrompt, userPrompt);
+            LlmResponse response = llm.call(LlmGateway.NICHE_QUERY, "niche", nicheRef(niche),
+                    LlmRequest.text(null, systemPrompt, userPrompt, null));
             entry.setModel(response.model());
             entry.setTokens(response.tokens());
             entry.setResponse(response.content());
@@ -106,10 +108,14 @@ public class NicheQueryGenerator {
             throw new LlmException(LlmException.Kind.OTHER, e.getMessage(), e);
         } finally {
             if (entry.getModel() == null) {
-                entry.setModel(llm.getModel());
+                entry.setModel(llm.defaultModel());
             }
             logRepository.save(entry);
         }
+    }
+
+    private static String nicheRef(NicheEntity niche) {
+        return niche.getId() == null ? null : niche.getId().toString();
     }
 
     // ---------- Пользовательский промпт ----------

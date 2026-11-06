@@ -157,6 +157,17 @@ taskmanager:
     # Поиск не принёс новых кандидатов (выдача исчерпана) - следующий через 24 ч, после второго
     # такого подряд - через 72 ч; поиск с новыми кандидатами возвращает обычный интервал.
     refill-empty-backoff-hours: ${NICHE_REFILL_EMPTY_BACKOFF_HOURS:24,72}
+  prod_specs:
+    # Рекомендации по закупкам, шаг 1: признаки карточки по фото и тексту (Qwen в Yandex AI Studio).
+    model: ${PROD_SPECS_MODEL:qwen3.6-35b-a3b}
+    # Лимит токенов ответа модели на одну карточку.
+    max-tokens: ${PROD_SPECS_MAX_TOKENS:1500}
+    # Пауза между запросами к модели при разметке пачки, мс.
+    pause-ms: ${PROD_SPECS_PAUSE_MS:1000}
+    # Шаг 2: анализ страты (вызов модели из сервиса аналитики через ядро).
+    analysis-model: ${PROD_SPECS_ANALYSIS_MODEL:qwen3.6-35b-a3b}
+    # Лимит токенов ответа по умолчанию; в запросе можно задать свой, не больше 8000.
+    analysis-max-tokens: ${PROD_SPECS_ANALYSIS_MAX_TOKENS:4000}
 yandex:
   ai:
     # Yandex AI Studio, OpenAI-совместимый Chat Completions API
@@ -166,7 +177,7 @@ yandex:
     model: ${YANDEX_MODEL:deepseek-v4.1-flash}
     temperature: ${YANDEX_TEMPERATURE:0.2}
     max-tokens: ${YANDEX_MAX_TOKENS:500}
-    timeout-seconds: ${YANDEX_TIMEOUT_SECONDS:60}
+    timeout-seconds: ${YANDEX_TIMEOUT_SECONDS:120}
 analytics:
   # Сервис аналитики (контейнер an-app в сети ядра): готовность сета для переключения
   # сезона. Ключ — тот же межсервисный PARSER_API_KEY (= SERVICE_API_KEY аналитики).

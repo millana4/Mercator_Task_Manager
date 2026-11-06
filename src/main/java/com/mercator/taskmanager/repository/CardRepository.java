@@ -65,6 +65,24 @@ public interface CardRepository extends JpaRepository<CardEntity, UUID> {
     Optional<CardEntity> findBySkuAndMarketplace(@Param("sku") String sku,
                                                  @Param("marketplaceId") Short marketplaceId);
 
+    // ---------- Поиск по списку sku (команда разметки признаков) ----------
+
+    /** id и sku найденной карточки. */
+    interface IdSku {
+        UUID getId();
+
+        String getSku();
+    }
+
+    // Карточки по списку sku на маркетплейсе (по названию).
+    @Query(value = """
+            SELECT c.id AS id, c.sku AS sku FROM card c
+            JOIN marketplace m ON m.id = c.marketplace_id
+            WHERE m.title = :marketplace AND c.sku IN (:skus)
+            """, nativeQuery = true)
+    List<IdSku> findIdsBySkus(@Param("marketplace") String marketplace,
+                              @Param("skus") List<String> skus);
+
     // ---------- Состав страт (stratum_card) ----------
 
     // Все карточки, когда-либо входившие в страту, и выбывшие тоже — exclude подбора
