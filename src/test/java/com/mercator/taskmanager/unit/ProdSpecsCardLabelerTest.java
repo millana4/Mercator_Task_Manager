@@ -161,13 +161,13 @@ class ProdSpecsCardLabelerTest {
     }
 
     @Test
-    void newPromptVersionRelabels() {
+    void otherPromptVersionDoesNotRelabel() {
         cardWith(IMAGE, content());
         String hash = ProdSpecsCardPrompt.inputHash(IMAGE, ProdSpecsCardPrompt.userPrompt(content()));
         when(attributesRepository.findById(id)).thenReturn(Optional.of(stored(hash, "v0")));
-        modelAnswers(ANSWER);
 
-        assertThat(labeler.label(id)).isEqualTo(LabelResult.LABELED);
+        assertThat(labeler.label(id)).isEqualTo(LabelResult.UP_TO_DATE);
+        verifyNoInteractions(gateway);
     }
 
     @Test

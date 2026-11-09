@@ -121,4 +121,15 @@ class ProdSpecsCardPromptTest {
         assertThat(ProdSpecsCardPrompt.inputHash(null, "текст"))
                 .isEqualTo(ProdSpecsCardPrompt.inputHash("", "текст"));
     }
+
+    @Test
+    void systemPromptRules() {
+        String prompt = ProdSpecsCardPrompt.SYSTEM_PROMPT;
+
+        assertThat(ProdSpecsCardPrompt.VERSION).isEqualTo("v2");
+        assertThat(prompt).contains("только товар из названия")
+                .contains("однотонный")
+                .contains("в одном поле")
+                .contains("\"extra\": []");
+    }
 }

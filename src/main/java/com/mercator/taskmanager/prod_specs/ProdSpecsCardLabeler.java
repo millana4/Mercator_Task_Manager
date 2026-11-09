@@ -20,7 +20,7 @@ import java.util.UUID;
  * Шаг 1 рекомендаций по закупкам: признаки одной карточки по фото и тексту.
  *
  * Карточка без адреса фото или без полного набора пропускается. Отпечаток входных данных
- * (адрес фото и текст запроса) и версия промпта совпали с сохранёнными — запрос не
+ * (адрес фото и текст запроса) совпали с сохранёнными — запрос не
  * отправляется. Иначе модель получает фото ссылкой и текст, ответ разбирается и пишется
  * в prod_specs_card: строка карточки заменяется.
  *
@@ -72,8 +72,7 @@ public class ProdSpecsCardLabeler {
         String userPrompt = ProdSpecsCardPrompt.userPrompt(content);
         String inputHash = ProdSpecsCardPrompt.inputHash(imageUrl, userPrompt);
         ProdSpecsCardEntity entity = attributesRepository.findById(cardId).orElse(null);
-        if (entity != null && inputHash.equals(entity.getInputHash())
-                && ProdSpecsCardPrompt.VERSION.equals(entity.getPromptVersion())) {
+        if (entity != null && inputHash.equals(entity.getInputHash())) {
             return LabelResult.UP_TO_DATE;
         }
 
