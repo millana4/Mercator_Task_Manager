@@ -6,7 +6,7 @@
 Дополнительно ведёт товарные ниши (подбор аналогов к карточке-референсу) и снимает
 поисковую выдачу по стратам.
 
-Оркеструет внешние парсеры: раздаёт задачи подбора, обхода и снимков выдачи через Redis,
+Оркестрирует внешние парсеры: раздаёт задачи подбора, обхода и снимков выдачи через Redis,
 принимает результаты и раскладывает их по двум базам — Postgres (структура и статусы) и
 ClickHouse (временные ряды и снимки). Сейчас поддерживает Ozon, регион Санкт-Петербург.
 
@@ -49,7 +49,9 @@ src/main/java/com/mercator/taskmanager/
 │   └── KidsStratumCsvParser, KidsStratumRow, HierarchicalSetImportService  # иерархический (детская)
 ├── client/OzonParserClient     # HTTP-клиент парсера (синхронный путь, отладка)
 ├── embedding/                  # EmbedderClient, EmbedderException — сервис эмбеддингов
-├── llm/                        # YandexLlmClient, LlmResponse, LlmException — нейросеть
+├── llm/                        # LlmGateway (единственный шлюз, журнал llm_request_log), LlmRequest, LlmResponse, YandexLlmClient, LlmException
+├── prod_specs/                 # признаки карточек по фото и тексту: ProdSpecsCardLabeler, ProdSpecsLabelQueue, ProdSpecsCardParser, ProdSpecsCardPrompt
+├── assignment/                 # AssignmentCalculator (формулы задания сета), AssignmentViews, SetStatus
 ├── matching/                   # подбор аналогов ниши
 │   ├── NicheMatchingProperties, NicheMatchingConfig  # группы видов, признаки, веса (niche-matching.yml)
 │   ├── CardFeatureExtractor, CardFeatures            # признаки карточки из content_txt
@@ -69,6 +71,10 @@ src/main/java/com/mercator/taskmanager/
 │   ├── CardLifecycleService                          # статусы карточек, наличие
 │   ├── MonitoringScheduler                           # потоковый обход
 │   ├── RefillScheduler                               # автодобор страт (13:00)
+│   ├── SeasonalSetService, SeasonalFillScheduler     # сезонные сеты: черновик, сбор (очередь подбора)
+│   ├── SeasonSwitchService, SeasonSwitchScheduler    # переключение категории на новый сет
+│   ├── AssignmentViewService                         # задание сета для админки
+│   ├── PriceBoostService                             # учащение обхода при скачке цены
 │   ├── CardContentBackfillService                    # дозаполнение content_txt
 │   ├── SearchSnapshotScheduler                       # снимки выдачи по расписанию и окну
 │   ├── NicheService, NicheScheduler                  # ниши: приём, удаление, продвижение по статусам
@@ -79,7 +85,7 @@ src/main/java/com/mercator/taskmanager/
 │   ├── NicheVerificationService                      # проверочный парсинг кандидатов
 │   └── NicheRefillService                            # автодобор ниш
 ├── controller/
-│   ├── SetImportController, AnalyticsController, CardContentController
+│   ├── SetImportController, AnalyticsController, CardContentController, AdminController
 │   ├── NicheController, NicheCreateRequest
 │   └── SearchSnapshotController
 └── config/
@@ -91,7 +97,7 @@ src/main/java/com/mercator/taskmanager/
 src/main/resources/
 ├── application.yaml            # настройки (значения по умолчанию, переопределяются .env)
 ├── niche-matching.yml          # группы видов изделия, признаки и веса подбора аналогов
-├── db/migration/               # миграции Postgres (Flyway), сейчас до V15
+├── db/migration/               # миграции Postgres (Flyway), сейчас до V23
 └── clickhouse/schema.sql       # эталонная схема ClickHouse
 
 docker/clickhouse-init/         # авто-накат схемы ClickHouse при первом старте
@@ -145,6 +151,31 @@ POST   /api/v1/niches                  # принять нишу: external_id, �
 DELETE /api/v1/niches/{externalId}     # удалить нишу
 ```
 
+Сезонные сеты (админка, межсервисный ключ `PARSER_API_KEY`):
+
+```
+GET    /api/v1/admin/overview
+GET    /api/v1/admin/sets/{id}
+GET    /api/v1/admin/sets/{id}/progress
+POST   /api/v1/admin/sets/{id}/draft                              # черновик из активного сета
+PATCH  /api/v1/admin/drafts/{id}                                  # сезон и параметры задания
+POST   /api/v1/admin/drafts/{id}/subcategories
+PATCH  /api/v1/admin/drafts/{id}/subcategories/{subId}
+DELETE /api/v1/admin/drafts/{id}/subcategories/{subId}
+POST   /api/v1/admin/drafts/{id}/subcategories/{subId}/strata
+PATCH  /api/v1/admin/drafts/{id}/strata/{stratumId}
+DELETE /api/v1/admin/drafts/{id}/strata/{stratumId}
+POST   /api/v1/admin/drafts/{id}/start                            # запустить сбор
+DELETE /api/v1/admin/drafts/{id}
+```
+
+Рекомендации по закупкам (вызывает аналитика, межсервисный ключ `PARSER_API_KEY`):
+
+```
+POST /api/v1/prod_specs/cards   # поставить в разметку карточки по SKU (до 200), ответ 202
+POST /api/v1/prod_specs/llm     # вызов модели для второго шага (purpose prod_specs_analysis)
+```
+
 Служебное:
 
 ```
@@ -182,8 +213,9 @@ curl -X POST http://localhost:8080/api/v1/sets/import \
 | Снимки выдачи  | `search:tasks:ozon:spb`  | `search:results:ozon:spb`  |
 | Обход          | `parse:tasks:ozon:spb`   | `parse:results:ozon:spb`   |
 
-Ядро кладёт задачи `LPUSH`, парсеры забирают `BRPOP` в порядке приоритета: подбор → выдача →
-обход. Все парсеры читают общие списки — конкурентный пул: заблокированный или стоящий на
+Ядро кладёт задачи `LPUSH`, парсеры забирают `BRPOP` в порядке приоритета: обход → подбор →
+выдача (обход первым, подбор и выдача — на свободный ресурс). Все парсеры читают общие списки —
+конкурентный пул: заблокированный или стоящий на
 паузе парсер просто не берёт задачи, остальные продолжают.
 
 План прогона снимков выдачи — отсортированное множество `search:planned` (вес — время
@@ -199,22 +231,18 @@ curl -X POST http://localhost:8080/api/v1/sets/import \
 
 ## Непрерывный обход
 
-`MonitoringScheduler` держит в `parse:tasks` буфер задач (`queue-buffer`) и доливает его каждые
-`refill-interval-ms`: берёт активные карточки, которых дольше всех не мерили
-(`last_measured_at ASC NULLS FIRST`), исключая уже отправленные (`last_enqueued_at` свежее
-окна ожидания), и помечает `last_enqueued_at`. Результат не пришёл за
-`inflight-timeout-minutes` (45) — карточка снова кандидат.
+`MonitoringScheduler` ставит в `parse:tasks` карточки, у которых с последнего замера прошёл временной интервал (`intervals`: kids_clothing — 10 ч, clothing — 23 ч), темпом Σ(карточек / интервал) × `rate-margin` (1,2) и доливает очередь до `queue-buffer`. Результат не пришёл за `inflight-timeout-minutes` (45) — карточка снова кандидат.
 
-Медленные категории (`slow-categories`, сейчас `clothing`) попадают в обход не чаще раза в
-`slow-min-interval-hours` (24) — данные собираются, но реже.
+Отставание (просрочено больше `reserve.on-share`, 5%, в любой категории) включает ключ `monitoring:reserve:<мп>:<гео>` — сигнал резервным парсерам; снимается ниже `off-share` (2%). Резкий скачок цены (`boost.threshold` 0,35) включает учащение: раз в час, пока цена не вернётся в пределы 3% или не пройдёт 48 ч, не более 30 карточек.
 
 ## Наблюдаемость
 
-- Длина очередей: `redis-cli LLEN parse:tasks:ozon:spb`, план выдачи — `ZCARD search:planned`.
-- Счётчики парсеров (пишут сами парсеры): `parser:<id>:ozon:done`, `antibot` (капчи),
-  `load_failed` (сбои загрузки), `search_done`, `search_antibot`.
-- Состояние бана парсера: `HGETALL parser:<id>:ozon:ban` (уровень, до какого времени пауза,
-  причина, поколение устройства).
+- Длина очередей: `redis-cli LLEN parse:tasks:ozon:spb` (так же `select:tasks:ozon:spb`,
+  `search:tasks:ozon:spb`), план выдачи — `ZCARD search:planned`.
+- Счётчики парсеров (накопительные, пишут сами парсеры): `parser:<id>:ozon:done`, `antibot`
+  (капчи), `load_failed` (сбои загрузки), `search_done`, `search_antibot`.
+- Сигнал резерва: `EXISTS monitoring:reserve:ozon:spb` — ключ стоит, пока обход отстаёт;
+  в логе `tm-app` — строки об отставании: `docker logs tm-app --since 6h 2>&1 | grep -E "отстаёт|снят"`.
 - Свежесть замеров по парсерам — `measurement.parser_id` в ClickHouse.
 
 ## Учёт партий наполнения
@@ -240,9 +268,64 @@ curl -X POST http://localhost:8080/api/v1/sets/import \
 
 ## Автодобор страт
 
-`RefillScheduler` ежедневно в 13:00 МСК считает дефицит по стратам (`count − active`) и
-отправляет задачи подбора замены с `exclude` — уже собранными SKU сета. Флаг
-`taskmanager.refill.enabled`.
+`RefillScheduler` ежедневно в 13:00 МСК считает дефицит по стратам активных сетов
+(`count − active`) и отправляет задачи подбора замены с `exclude` — уже собранными SKU сета.
+Задача уходит на каждую страту с дефицитом, все сразу, без ограничения темпа; сет в сборе
+подбирается отдельной очередью (см. «Сезонные сеты»). Рост `count` в страте (например, после
+смены `rotation_factor`) превращается в задачи подбора на весь прирост при ближайшем добре.
+Флаг `taskmanager.refill.enabled`.
+
+## Задание сета: количество карточек
+
+Параметры сета — колонки `set`: `analysis_cards` (карточек на анализ категории),
+`min_subcategory_cards` (минимум на отслеживаемую подкатегорию), `rotation_factor`
+(коэффициент ротации — запас на выбывание). Детская одежда: 200 / 40 / 1,60 (миграция V23,
+раньше 200 / 30 / 1,35).
+
+Количества считает `AssignmentCalculator` — единственное место формул:
+
+```
+база              = доля подкатегории × analysis_cards
+с добавкой        = max(база, min_subcategory_cards), если подкатегория отслеживается; иначе база
+с ротацией        = с добавкой × rotation_factor
+итог подкатегории = округление(с ротацией)
+количество страты = округление(итог подкатегории × доля запроса)    # доля запроса пуста — 1
+квота анализа     = округление(доля подкатегории × analysis_cards × доля запроса)
+```
+
+Округление — половина вверх. Количество страты — план парсинга, квота — сколько карточек
+страты идёт в анализ категории. Отслеживаемая подкатегория при 40 и 1,60 держит 64 карточки
+на парсинге: аналитика считает подкатегорию и нишу на всех годных карточках (минимум 40), а годных
+(свежая цена, ряд без пропусков) около 70–80% состава.
+
+Параметры черновика меняет `PATCH /api/v1/admin/drafts/{id}`, количества пересчитываются сразу
+(`recalc`). Действующий сет через API не правится: значения V23 заданы миграцией, она же
+пересчитала количества страт. Размер ниши — `taskmanager.niche.target-count` (сколько нужно
+для анализа) и `plan-count` (сколько держать на парсинге), сейчас 40 и 50; значения копируются
+в строку ниши при создании.
+
+## Сезонные сеты
+
+Статусы `set`: `draft` → `collecting` → `active` → `retired`. Админка создаёт черновик копией
+активного сета со следующим сезоном, правит подкатегории и страты, запускает сбор; в связке
+не больше одного черновика и одного сбора.
+
+Сет в сборе подбирает `SeasonalFillScheduler`: тик раз в минуту, по маркетплейсу не больше одной
+задачи за `season.select-interval-minutes` (30), страта с дефицитом, повтор через
+`season.select-retry-hours` (12); пока обход отстаёт, подбор ждёт. Автодобор такие сеты не трогает.
+
+`SeasonSwitchScheduler` (`season.switch-cron`, 01:15 и 13:15 МСК) проверяет готовность нового
+сета в аналитике (`/internal/sets/{id}/readiness`) и переключает категорию; карточки, которых нет
+в новом сете и в нишах, перестают обходиться. Карточка одна на SKU, членство в стратах — таблица
+`stratum_card` (V19).
+
+## Рекомендации по закупкам
+
+Ядро хранит признаки карточек и делает платные обращения к Yandex: `LlmGateway` — единственный
+шлюз, журнал — `llm_request_log`, ключи Yandex только в `.env` ядра. Признаки одной карточки
+по первому фото и тексту — `prod_specs_card` (V22, `image_url` — V21); отбор карточек и анализ
+по стратам делает аналитика через `POST /api/v1/prod_specs/cards` и `/llm`. Модель —
+`taskmanager.prod_specs.model` (`PROD_SPECS_MODEL`).
 
 ## Полный набор контента
 
@@ -277,7 +360,7 @@ curl -X POST http://localhost:8080/api/v1/sets/import \
 - `selecting` → пачка подбора (до `select-batch-size` кандидатов) из выдачи и страт;
   результат не пришёл за `select-timeout-hours` — повтор; ошибка подбора — повтор через
   `select-retry-delay-minutes`;
-- `ranking` → схожесть новых кандидатов, отбор; набрано `target-count` — `active`,
+- `ranking` → схожесть новых кандидатов, отбор; набрано `plan-count` — `active`,
   иначе снова `selecting`;
 - `active` → карточки ниши в обходе; автодобор раз в `refill-interval-hours`;
 - `deleted` — удалена (общие с другими нишами карточки остаются у них).
@@ -368,20 +451,29 @@ compose с открытыми портами 5433 и 8123; без них пад�
 | `taskmanager.monitoring.queue-buffer` | буфер очереди обхода (10) |
 | `taskmanager.monitoring.refill-interval-ms` | период долива (10000) |
 | `taskmanager.monitoring.inflight-timeout-minutes` | окно ожидания результата обхода (45) |
-| `taskmanager.monitoring.slow-categories` / `slow-min-interval-hours` | медленные категории (clothing / 24) |
-| `taskmanager.redis.*-prefix` | префиксы ключей списков |
+| `taskmanager.monitoring.intervals` | интервал планового обхода по категориям, ч (`MONITORING_INTERVALS`: kids_clothing=10,clothing=23) |
+| `taskmanager.monitoring.rate-margin` | запас темпа постановки (1,2) |
+| `taskmanager.monitoring.reserve.*` | отставание: `lag-extra-hours` (1), `on-share` / `off-share` (0,05 / 0,02), `signal-ttl-seconds` (120) |
+| `taskmanager.monitoring.boost.*` | учащение при скачке цены: `threshold` (0,35), `return-tolerance` (0,03), `hold-hours` (48), `interval-minutes` (60), `max-cards` (30) |
+| `taskmanager.redis.*-prefix` | префиксы ключей списков и сигнала резерва (`reserve-signal-prefix`: monitoring:reserve) |
 | `taskmanager.search-snapshot.enabled` | снимки выдачи (true) |
-| `taskmanager.search-snapshot.schedule` | расписание, МСК (kids_clothing=06:37,18:37;clothing=18:37) |
+| `taskmanager.search-snapshot.schedule` | расписание, МСК, формат `категория=ЧЧ:ММ[,ЧЧ:ММ];…` (kids_clothing=18:37) |
 | `taskmanager.search-snapshot.spread-minutes` | окно прогона (240) |
-| `taskmanager.niche.target-count` / `plan-count` | размер ниши (30 / 40; на сервере 10 / 10) |
+| `taskmanager.season.enabled` / `select-interval-minutes` / `select-retry-hours` / `tick-ms` | сбор сезонного сета: флаг / пауза между задачами / повтор страты / тик (true / 30 / 12 / 60000) |
+| `taskmanager.season.switch-cron` | проверка готовности и переключение сезонного сета, МСК (`0 15 1,13 * * *`) |
+| `taskmanager.niche.target-count` / `plan-count` | размер ниши: сколько нужно для анализа / сколько держать на парсинге (40 / 50) |
 | `taskmanager.niche.candidate-multiplier` | запас кандидатов автодобора (2) |
 | `taskmanager.niche.select-batch-size` | пачка подбора (10) |
 | `taskmanager.niche.scheduler-interval-ms` | тик планировщика ниш (30000) |
 | `taskmanager.niche.llm-max-attempts` / `llm-retry-delay-minutes` | нейросеть: попытки / пауза (3 / 5) |
-| `taskmanager.niche.select-timeout-hours` / `select-retry-delay-minutes` | пачка подбора: ожидание / пауза после ошибки (3 / 30) |
+| `taskmanager.niche.select-timeout-hours` / `select-retry-delay-minutes` | пачка подбора: ожидание / пауза после ошибки (12 / 30) |
 | `taskmanager.niche.refill-interval-hours` | автодобор ниш (6) |
+| `taskmanager.niche.refill-empty-backoff-hours` | пауза после поиска без новых кандидатов: первый раз / второй подряд (24,72) |
+| `taskmanager.prod_specs.*` | рекомендации по закупкам: `model` и `analysis-model` (qwen3.6-35b-a3b), `max-tokens` (1500), `pause-ms` (1000), `analysis-max-tokens` (4000) |
 | `taskmanager.fill.batch-timeout` | таймаут партии наполнения (PT4H) |
+| `taskmanager.fill.search-priority-days` | окно частых SKU выдачи для подбора, суток (7) |
 | `taskmanager.card.max-failed-attempts` / `notify-grace-days` | списание карточки (5 / 7) |
-| `taskmanager.refill.enabled` | автодобор страт |
-| `yandex.ai.*` | нейросеть: адрес, ключ, каталог, модель (deepseek-v4-flash), таймаут |
+| `taskmanager.refill.enabled` | автодобор страт (true) |
+| `yandex.ai.*` | нейросеть: адрес, ключ, каталог, модель запросов ниш (`YANDEX_MODEL`, deepseek-v4.1-flash), температура (0,2), лимит токенов (500), таймаут (120 с) |
+| `analytics.url` / `api-key` / `timeout-seconds` | сервис аналитики: готовность сета для переключения сезона (http://an-app:8020 / PARSER_API_KEY / 30) |
 | `embedder.url` / `timeout-seconds` | сервис эмбеддингов (http://emb-app:8000 / 600) |
