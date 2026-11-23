@@ -98,7 +98,7 @@ taskmanager:
       # Учащение снимается, когда цена вернулась к цене до скачка в пределах
       # return-tolerance или продержалась hold-hours (новая реальная цена).
       return-tolerance: ${MONITORING_BOOST_RETURN_TOLERANCE:0.03}
-      hold-hours: ${MONITORING_BOOST_HOLD_HOURS:48}
+      hold-hours: ${MONITORING_BOOST_HOLD_HOURS:24}
       # Интервал обхода карточки на учащении, мин, и потолок карточек на учащении.
       interval-minutes: ${MONITORING_BOOST_INTERVAL_MINUTES:60}
       max-cards: ${MONITORING_BOOST_MAX_CARDS:30}
@@ -132,9 +132,9 @@ taskmanager:
     switch-cron: ${SEASON_SWITCH_CRON:0 15 1,13 * * *}
   niche:
     # Размер ниши: target-count — сколько карточек нужно для анализа,
-    # plan-count — сколько держать на парсинге (с запасом на выбывание).
+    # plan-count — сколько держать на парсинге (для новых ниш равен target-count; расчёт идёт по всем годным карточкам).
     target-count: ${NICHE_TARGET_COUNT:40}
-    plan-count: ${NICHE_PLAN_COUNT:50}
+    plan-count: ${NICHE_PLAN_COUNT:40}
     # Автодобор: поиск новых кандидатов на дефицит × candidate-multiplier
     # (запас на отсев по близости и на непрошедшие проверку).
     candidate-multiplier: ${NICHE_CANDIDATE_MULTIPLIER:2}

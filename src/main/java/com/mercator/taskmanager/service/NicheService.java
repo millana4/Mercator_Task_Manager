@@ -40,7 +40,7 @@ public class NicheService {
                         CardRepository cardRepository,
                         ReferenceUrlParser urlParser,
                         @Value("${taskmanager.niche.target-count:40}") int targetCount,
-                        @Value("${taskmanager.niche.plan-count:50}") int planCount) {
+                        @Value("${taskmanager.niche.plan-count:40}") int planCount) {
         this.nicheRepository = nicheRepository;
         this.setRepository = setRepository;
         this.cardRepository = cardRepository;
