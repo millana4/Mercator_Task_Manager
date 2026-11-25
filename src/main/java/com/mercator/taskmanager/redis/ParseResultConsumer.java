@@ -38,6 +38,9 @@ public class ParseResultConsumer {
 
     private static final Logger log = LoggerFactory.getLogger(ParseResultConsumer.class);
 
+    /** Ошибка разбора ответа на стороне парсера (формат страницы Ozon изменился): вина не карточки. */
+    private static final String PARSER_ERROR_PREFIX = "ValidationError";
+
     private final MeasurementRepository measurementRepository;
     private final CardLifecycleService lifecycle;
     private final CardRepository cardRepository;
@@ -106,6 +109,11 @@ public class ParseResultConsumer {
             }
             log.warn("Обход card_id={} неуспешен (parser_id={}): {}",
                     result.getCardId(), result.getParserId(), result.getError());
+            // Ошибка разбора на стороне парсера: карточку не штрафуем. Иначе при смене формата Ozon
+            // карточки массово уходят в stale и выпадают из обхода (сбой 24.11.2026).
+            if (result.getError() != null && result.getError().startsWith(PARSER_ERROR_PREFIX)) {
+                return;
+            }
             lifecycle.markFailure(result.getCardId());
             return;
         }
